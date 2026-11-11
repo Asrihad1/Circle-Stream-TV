@@ -1,9 +1,15 @@
 package com.circleftp.stream.ui.livetv
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.focusable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
@@ -27,12 +33,14 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.zIndex
 import com.circleftp.stream.data.iptv.IptvCatalog
 import com.circleftp.stream.data.iptv.IptvChannel
 import com.circleftp.stream.player.rememberNetworkSpeed
@@ -342,29 +350,46 @@ fun IptvChannelCard(
     channel: IptvChannel,
     onClick: () -> Unit
 ) {
-    val borderColor = if (channel.isActive) {
-        Color(0xFF00E676).copy(alpha = 0.35f)
-    } else {
-        Color(0xFFE53935).copy(alpha = 0.35f)
-    }
+    val interactionSource = remember { MutableInteractionSource() }
+    val isFocused by interactionSource.collectIsFocusedAsState()
+
+    // 1. "Bump Up" Scale Animation
+    val scale by animateFloatAsState(
+        targetValue = if (isFocused) 1.08f else 1.0f,
+        animationSpec = tween(durationMillis = 200),
+        label = "channel_card_scale"
+    )
+
+    // 2. "Light Stroke" Border Animation
+    val activeColor = if (channel.isActive) Color(0xFF00E676) else Color(0xFFE53935)
+    val animatedBorderColor by animateColorAsState(
+        targetValue = if (isFocused) Color.White else activeColor.copy(alpha = 0.35f),
+        animationSpec = tween(durationMillis = 200),
+        label = "channel_border"
+    )
 
     val glowColor = if (channel.isActive) {
-        Color(0xFF00E676).copy(alpha = 0.08f)
+        Color(0xFF00E676).copy(alpha = if (isFocused) 0.25f else 0.08f)
     } else {
-        Color(0xFFE53935).copy(alpha = 0.08f)
+        Color(0xFFE53935).copy(alpha = if (isFocused) 0.25f else 0.08f)
     }
 
     Card(
         modifier = Modifier
             .fillMaxWidth()
+            .zIndex(if (isFocused) 1f else 0f) // Prevents scaling under neighboring cards
+            .scale(scale)
             .clip(RoundedCornerShape(14.dp))
-            .clickable { onClick() }
             .border(
-                width = 1.dp,
-                color = borderColor,
+                width = if (isFocused) 3.dp else 1.dp,
+                color = animatedBorderColor,
                 shape = RoundedCornerShape(14.dp)
-            ),
-        colors = CardDefaults.cardColors(containerColor = CircleCard),
+            )
+            .focusable(interactionSource = interactionSource)
+            .clickable(interactionSource = interactionSource, indication = null) {
+                onClick()
+            },
+        colors = CardDefaults.cardColors(containerColor = if (isFocused) CircleCard.copy(alpha = 0.95f) else CircleCard),
         shape = RoundedCornerShape(14.dp)
     ) {
         Box(

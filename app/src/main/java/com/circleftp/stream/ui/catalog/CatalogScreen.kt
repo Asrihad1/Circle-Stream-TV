@@ -1,7 +1,14 @@
 package com.circleftp.stream.ui.catalog
 
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.focusable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
@@ -22,6 +29,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
@@ -32,6 +40,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.zIndex
 import coil.compose.AsyncImage
 import com.circleftp.stream.data.api.CircleFtpApiClient
 import com.circleftp.stream.data.config.ConfigManager
@@ -443,10 +452,33 @@ fun CircleMediaCard(
     post: PostSummary,
     onClick: () -> Unit
 ) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val isFocused by interactionSource.collectIsFocusedAsState()
+
+    // 1. "Bump Up" Scale Animation
+    val scale by animateFloatAsState(
+        targetValue = if (isFocused) 1.1f else 1.0f,
+        animationSpec = tween(durationMillis = 200),
+        label = "card_scale"
+    )
+
+    // 2. "Light Stroke" Border Animation
+    val borderColor by animateColorAsState(
+        targetValue = if (isFocused) Color.White else Color.Transparent,
+        animationSpec = tween(durationMillis = 200),
+        label = "card_border"
+    )
+
     Column(
         modifier = Modifier
             .width(132.dp)
-            .clickable { onClick() }
+            .zIndex(if (isFocused) 1f else 0f) // Prevents scaling under neighboring cards
+            .scale(scale)
+            .border(width = if (isFocused) 3.dp else 0.dp, color = borderColor, shape = RoundedCornerShape(8.dp))
+            .focusable(interactionSource = interactionSource)
+            .clickable(interactionSource = interactionSource, indication = null) {
+                onClick()
+            }
     ) {
         Box(
             modifier = Modifier

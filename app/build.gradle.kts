@@ -22,11 +22,11 @@ android {
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.circle.stream"
+        applicationId = "com.circle.stream.tv"
         minSdk = 24
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.3.0"
+        versionCode = 3
+        versionName = "1.3.2-tv"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -64,15 +64,17 @@ android {
         val variant = this
         outputs.all {
             val outputImpl = this as? com.android.build.gradle.internal.api.BaseVariantOutputImpl
-            outputImpl?.outputFileName = "circlestream.apk"
+            outputImpl?.outputFileName = "circlestreamtv.apk"
         }
         variant.assembleProvider.configure {
             doLast {
                 val apk = variant.outputs.firstOrNull()?.outputFile
                 if (apk != null && apk.exists()) {
+                    val rootTvApk = file("${rootDir}/circlestreamtv.apk")
                     val rootApk = file("${rootDir}/circlestream.apk")
+                    apk.copyTo(rootTvApk, overwrite = true)
                     apk.copyTo(rootApk, overwrite = true)
-                    println(">>> Successfully copied ${apk.name} to ${rootApk.absolutePath} (${rootApk.length()} bytes)")
+                    println(">>> Successfully copied ${apk.name} to ${rootTvApk.absolutePath} (${rootTvApk.length()} bytes)")
                 }
             }
         }
@@ -157,7 +159,4 @@ dependencies {
     implementation("com.google.firebase:firebase-analytics")
     implementation("com.google.firebase:firebase-crashlytics")
     implementation("com.google.firebase:firebase-config")
-
-    // Start.io In-App Ad SDK
-    implementation("com.startapp:inapp-sdk:5.1.0")
 }

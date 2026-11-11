@@ -32,6 +32,12 @@ class AuthSyncManager(private val context: Context) {
         @Volatile
         private var INSTANCE: AuthSyncManager? = null
 
+        @Volatile
+        private var isFirebaseAuthAvailable: Boolean? = null
+
+        @Volatile
+        private var isFirestoreAvailable: Boolean? = null
+
         fun getInstance(context: Context): AuthSyncManager {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: AuthSyncManager(context.applicationContext).also { INSTANCE = it }
@@ -41,10 +47,13 @@ class AuthSyncManager(private val context: Context) {
 
     /**
      * Checks if a Firebase user is authenticated without crashing if Firebase classes are absent.
+     * Caches class availability so ClassNotFoundException is only tested once.
      */
     fun getCurrentUserId(): String? {
+        if (isFirebaseAuthAvailable == false) return null
         return try {
             val authClass = Class.forName("com.google.firebase.auth.FirebaseAuth")
+            isFirebaseAuthAvailable = true
             val getInstanceMethod = authClass.getMethod("getInstance")
             val auth = getInstanceMethod.invoke(null)
             val getCurrentUserMethod = authClass.getMethod("getCurrentUser")
@@ -53,6 +62,7 @@ class AuthSyncManager(private val context: Context) {
             val getUidMethod = userClass.getMethod("getUid")
             getUidMethod.invoke(user) as? String
         } catch (e: Throwable) {
+            isFirebaseAuthAvailable = false
             null
         }
     }
@@ -143,8 +153,10 @@ class AuthSyncManager(private val context: Context) {
     }
 
     private fun syncWatchLaterDocToFirestore(uid: String, item: WatchLaterEntity) {
+        if (isFirestoreAvailable == false) return
         try {
             val firestoreClass = Class.forName("com.google.firebase.firestore.FirebaseFirestore")
+            isFirestoreAvailable = true
             val getDbMethod = firestoreClass.getMethod("getInstance")
             val firestore = getDbMethod.invoke(null) ?: return
             val collectionMethod = firestoreClass.getMethod("collection", String::class.java)
@@ -166,13 +178,16 @@ class AuthSyncManager(private val context: Context) {
             )
             setMethod.invoke(itemDoc, map)
         } catch (e: Throwable) {
+            isFirestoreAvailable = false
             // Ignored if Firestore not present
         }
     }
 
     private fun deleteWatchLaterDocFromFirestore(uid: String, mediaId: String) {
+        if (isFirestoreAvailable == false) return
         try {
             val firestoreClass = Class.forName("com.google.firebase.firestore.FirebaseFirestore")
+            isFirestoreAvailable = true
             val getDbMethod = firestoreClass.getMethod("getInstance")
             val firestore = getDbMethod.invoke(null) ?: return
             val collectionMethod = firestoreClass.getMethod("collection", String::class.java)
@@ -185,13 +200,16 @@ class AuthSyncManager(private val context: Context) {
             val deleteMethod = itemDoc.javaClass.getMethod("delete")
             deleteMethod.invoke(itemDoc)
         } catch (e: Throwable) {
+            isFirestoreAvailable = false
             // Ignored if Firestore not present
         }
     }
 
     private fun syncHistoryDocToFirestore(uid: String, item: WatchHistoryEntity) {
+        if (isFirestoreAvailable == false) return
         try {
             val firestoreClass = Class.forName("com.google.firebase.firestore.FirebaseFirestore")
+            isFirestoreAvailable = true
             val getDbMethod = firestoreClass.getMethod("getInstance")
             val firestore = getDbMethod.invoke(null) ?: return
             val collectionMethod = firestoreClass.getMethod("collection", String::class.java)
@@ -219,6 +237,7 @@ class AuthSyncManager(private val context: Context) {
             )
             setMethod.invoke(itemDoc, map)
         } catch (e: Throwable) {
+            isFirestoreAvailable = false
             // Ignored if Firestore not present
         }
     }

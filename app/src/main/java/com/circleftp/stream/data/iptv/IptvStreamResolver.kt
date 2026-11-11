@@ -41,13 +41,13 @@ object IptvStreamResolver {
                 .header("Referer", "$BASE_PORTAL/")
                 .build()
 
-            val response = httpClient.newCall(request).execute()
-            if (!response.isSuccessful) {
-                Log.w(TAG, "Failed to load play.php for channel $channelId: HTTP ${response.code}")
-                return@runCatching null
-            }
-
-            val html = response.body?.string() ?: return@runCatching null
+            val html = httpClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    Log.w(TAG, "Failed to load play.php for channel $channelId: HTTP ${response.code}")
+                    return@runCatching null
+                }
+                response.body?.string()
+            } ?: return@runCatching null
             val iframeMatch = IFRAME_REGEX.find(html) ?: run {
                 Log.w(TAG, "No player iframe found in play.php for channel $channelId")
                 return@runCatching null

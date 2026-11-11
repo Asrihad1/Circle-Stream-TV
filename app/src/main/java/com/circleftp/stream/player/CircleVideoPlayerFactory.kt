@@ -15,6 +15,7 @@ import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.Renderer
+import androidx.media3.exoplayer.upstream.DefaultAllocator
 import androidx.media3.exoplayer.audio.AudioRendererEventListener
 import androidx.media3.exoplayer.audio.AudioSink
 import androidx.media3.exoplayer.audio.DefaultAudioSink
@@ -193,8 +194,11 @@ object CircleVideoPlayerFactory {
             .setMediaCodecSelector(combinedCodecSelector)
 
         // Robust Extractor / Demuxer Configuration for Seeking & Container Tolerance
+        // Forces constant bitrate (CBR) seeking on unindexed .mkv and .mp4 files over HTTP/FTP
         val extractorsFactory = DefaultExtractorsFactory()
             .setConstantBitrateSeekingEnabled(true)
+            .setConstantBitrateSeekingAlwaysEnabled(true)
+            .setConstantBitrateSeekingAlwaysEnabled(true)
 
         val defaultProperties = ActivePlayerSession.headers.toMutableMap().apply {
             put("User-Agent", USER_AGENT)
@@ -206,14 +210,16 @@ object CircleVideoPlayerFactory {
 
         val mediaSourceFactory = DefaultMediaSourceFactory(context.applicationContext, extractorsFactory)
             .setDataSourceFactory(dataSourceFactory)
+            .setLiveTargetOffsetMs(30_000L)
 
-        // High-bitrate BDIX buffer to support fast timeline dragging & scrubbing
+        // Heavy-duty buffer setup: Keep 30s to 60s of video in RAM
         val loadControl = DefaultLoadControl.Builder()
+            .setAllocator(DefaultAllocator(true, C.DEFAULT_BUFFER_SEGMENT_SIZE))
             .setBufferDurationsMs(
-                /* minBufferMs = */ 10_000,
-                /* maxBufferMs = */ 45_000,
-                /* bufferForPlaybackMs = */ 1_500,
-                /* bufferForPlaybackAfterRebufferMs = */ 3_000
+                /* minBufferMs = */ 30_000,          // Always try to keep at least 30 seconds buffered
+                /* maxBufferMs = */ 60_000,          // Pre-buffer up to 60 seconds ahead
+                /* bufferForPlaybackMs = */ 3_000,   // Start playback quickly after 3 seconds
+                /* bufferForPlaybackAfterRebufferMs = */ 8_000 // Build 8s cushion before resuming on stall
             )
             .setPrioritizeTimeOverSizeThresholds(true)
             .setBackBuffer(15_000, true) // Retain 15s back buffer so rewinding is instantaneous
@@ -249,12 +255,92 @@ object CircleVideoPlayerFactory {
         return player
     }
 
+    /**
+     * Builds a persistent, low-latency ExoPlayer instance dedicated to TV Live Streams.
+     * Buffers min 1000ms and max 2500ms for near-instant stream start & rapid channel switching.
+     */
+    fun createLivePlayer(
+        context: Context,
+        decoderMode: DecoderMode = DecoderMode.HW
+    ): ExoPlayer {
+        val combinedCodecSelector = MediaCodecSelector { mimeType, requiresSecureDecoder, requiresTunnelingDecoder ->
+            if (mimeType.equals(MimeTypes.AUDIO_AC3, ignoreCase = true) ||
+                mimeType.equals(MimeTypes.AUDIO_E_AC3, ignoreCase = true) ||
+                mimeType.equals(MimeTypes.AUDIO_DTS, ignoreCase = true)
+            ) {
+                return@MediaCodecSelector emptyList()
+            }
+            try {
+                MediaCodecSelector.DEFAULT.getDecoderInfos(mimeType, requiresSecureDecoder, requiresTunnelingDecoder)
+            } catch (_: Throwable) {
+                emptyList()
+            }
+        }
+
+        val renderersFactory = CircleCustomRenderersFactory(context.applicationContext, decoderMode)
+            .setMediaCodecSelector(combinedCodecSelector)
+
+        val extractorsFactory = DefaultExtractorsFactory()
+            .setConstantBitrateSeekingEnabled(true)
+            .setConstantBitrateSeekingAlwaysEnabled(true)
+
+        val defaultProperties = ActivePlayerSession.headers.toMutableMap().apply {
+            put("User-Agent", USER_AGENT)
+        }
+
+        val dataSourceFactory = OkHttpDataSource.Factory(streamingOkHttpClient)
+            .setUserAgent(USER_AGENT)
+            .setDefaultRequestProperties(defaultProperties)
+
+        val mediaSourceFactory = DefaultMediaSourceFactory(context.applicationContext, extractorsFactory)
+            .setDataSourceFactory(dataSourceFactory)
+            .setLiveTargetOffsetMs(30_000L)
+
+        // Heavy-duty buffer setup for TV live feeds: Keep 30s to 60s of video in RAM
+        val liveLoadControl = DefaultLoadControl.Builder()
+            .setAllocator(DefaultAllocator(true, C.DEFAULT_BUFFER_SEGMENT_SIZE))
+            .setBufferDurationsMs(
+                /* minBufferMs = */ 30_000,          // Always try to keep at least 30 seconds buffered
+                /* maxBufferMs = */ 60_000,          // Pre-buffer up to 60 seconds ahead
+                /* bufferForPlaybackMs = */ 3_000,   // Start playback quickly after 3 seconds
+                /* bufferForPlaybackAfterRebufferMs = */ 8_000 // Build 8s cushion before resuming on stall
+            )
+            .setBackBuffer(15_000, true)
+            .setPrioritizeTimeOverSizeThresholds(true)
+            .build()
+
+        val player = ExoPlayer.Builder(context.applicationContext, renderersFactory)
+            .setMediaSourceFactory(mediaSourceFactory)
+            .setLoadControl(liveLoadControl)
+            .build()
+
+        val audioAttributes = AudioAttributes.Builder()
+            .setUsage(C.USAGE_MEDIA)
+            .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
+            .build()
+        player.setAudioAttributes(audioAttributes, true)
+
+        player.trackSelectionParameters = player.trackSelectionParameters
+            .buildUpon()
+            .setPreferredAudioMimeTypes(
+                MimeTypes.AUDIO_E_AC3,
+                MimeTypes.AUDIO_AC3,
+                MimeTypes.AUDIO_DTS,
+                MimeTypes.AUDIO_AAC,
+                MimeTypes.AUDIO_OPUS,
+                MimeTypes.AUDIO_VORBIS
+            )
+            .build()
+
+        return player
+    }
+
     fun buildMediaItem(
         title: String,
         rawStreamUrl: String,
         subtitles: List<SubtitleTrack> = emptyList()
     ): MediaItem {
-        val normalizedUrl = UrlNormalizer.normalize(rawStreamUrl)
+        val safeUrl = UrlNormalizer.getSafeEncodedUrl(rawStreamUrl)
         val subtitleConfigs = subtitles.mapNotNull { sub ->
             if (sub.url.isBlank()) return@mapNotNull null
             val mimeType = if (sub.format.equals("vtt", ignoreCase = true) || sub.url.contains(".vtt", ignoreCase = true)) {
@@ -271,7 +357,7 @@ object CircleVideoPlayerFactory {
         }
 
         val builder = MediaItem.Builder()
-            .setUri(normalizedUrl)
+            .setUri(safeUrl)
             .setSubtitleConfigurations(subtitleConfigs)
             .setMediaMetadata(
                 androidx.media3.common.MediaMetadata.Builder()
@@ -279,10 +365,12 @@ object CircleVideoPlayerFactory {
                     .build()
             )
 
-        if (normalizedUrl.contains(".m3u8") || ActivePlayerSession.providerId == "iptvidn") {
+        if (safeUrl.contains(".m3u8") || ActivePlayerSession.providerId == "iptvidn") {
             builder.setLiveConfiguration(
                 MediaItem.LiveConfiguration.Builder()
-                    .setTargetOffsetMs(6000L)
+                    .setTargetOffsetMs(30_000L) // Play 30 seconds behind live broadcast for rock-solid stability
+                    .setMinOffsetMs(15_000L)
+                    .setMaxOffsetMs(60_000L)
                     .setMinPlaybackSpeed(0.97f)
                     .setMaxPlaybackSpeed(1.03f)
                     .build()

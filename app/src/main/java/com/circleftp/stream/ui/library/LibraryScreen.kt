@@ -1,7 +1,14 @@
 package com.circleftp.stream.ui.library
 
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.focusable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -20,6 +27,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
@@ -29,6 +37,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.zIndex
 import coil.compose.AsyncImage
 import com.circleftp.stream.data.local.CircleDatabase
 import com.circleftp.stream.data.local.WatchHistoryEntity
@@ -190,10 +199,28 @@ private fun WatchLaterCard(
     onClick: () -> Unit,
     onDelete: () -> Unit
 ) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val isFocused by interactionSource.collectIsFocusedAsState()
+
+    val scale by animateFloatAsState(
+        targetValue = if (isFocused) 1.08f else 1.0f,
+        animationSpec = tween(durationMillis = 200),
+        label = "wl_scale"
+    )
+    val borderColor by animateColorAsState(
+        targetValue = if (isFocused) Color.White else Color.Transparent,
+        animationSpec = tween(durationMillis = 200),
+        label = "wl_border"
+    )
+
     Card(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick),
+            .zIndex(if (isFocused) 1f else 0f)
+            .scale(scale)
+            .border(width = if (isFocused) 3.dp else 0.dp, color = borderColor, shape = RoundedCornerShape(8.dp))
+            .focusable(interactionSource = interactionSource)
+            .clickable(interactionSource = interactionSource, indication = null, onClick = onClick),
         shape = RoundedCornerShape(8.dp),
         colors = CardDefaults.cardColors(containerColor = CircleCard)
     ) {
@@ -284,10 +311,28 @@ private fun WatchedCard(
     item: WatchHistoryEntity,
     onClick: () -> Unit
 ) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val isFocused by interactionSource.collectIsFocusedAsState()
+
+    val scale by animateFloatAsState(
+        targetValue = if (isFocused) 1.08f else 1.0f,
+        animationSpec = tween(durationMillis = 200),
+        label = "watched_scale"
+    )
+    val borderColor by animateColorAsState(
+        targetValue = if (isFocused) Color.White else Color.Transparent,
+        animationSpec = tween(durationMillis = 200),
+        label = "watched_border"
+    )
+
     Card(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick),
+            .zIndex(if (isFocused) 1f else 0f)
+            .scale(scale)
+            .border(width = if (isFocused) 3.dp else 0.dp, color = borderColor, shape = RoundedCornerShape(8.dp))
+            .focusable(interactionSource = interactionSource)
+            .clickable(interactionSource = interactionSource, indication = null, onClick = onClick),
         shape = RoundedCornerShape(8.dp),
         colors = CardDefaults.cardColors(containerColor = CircleCard)
     ) {

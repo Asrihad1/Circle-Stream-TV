@@ -1,10 +1,19 @@
 package com.circleftp.stream.ui.home
 
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.focusable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.layout.*
+import com.circleftp.stream.ui.components.TvNavDestination
+import com.circleftp.stream.ui.components.TvSideNavigationRail
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
@@ -20,6 +29,7 @@ import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.Category
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.LiveTv
 import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material.icons.filled.PlayArrow
@@ -33,8 +43,13 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -43,6 +58,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.zIndex
 import coil.compose.AsyncImage
 import com.circleftp.stream.R
 import com.circleftp.stream.data.api.CircleFtpApiClient
@@ -54,7 +70,7 @@ import com.circleftp.stream.data.provider.model.MediaItemModel
 import com.circleftp.stream.player.CircleDownloadManager
 import com.circleftp.stream.player.rememberNetworkSpeed
 import com.circleftp.stream.ui.components.ContinueWatchingRow
-import com.circleftp.stream.ui.components.StartIoBanner
+import com.circleftp.stream.ui.components.TvLegalDisclaimerDialog
 import com.circleftp.stream.ui.theme.*
 
 /**
@@ -71,10 +87,7 @@ fun HomeScreen(
     onSelectPost: (Long) -> Unit = { onSelectMedia("circleftp", it.toString()) },
     onResumePlayback: (WatchHistoryEntity) -> Unit = {},
     onOpenSearch: () -> Unit,
-    onOpenCategories: () -> Unit,
     onOpenLibrary: () -> Unit = {},
-    onOpenDownloads: () -> Unit,
-    onOpenSettings: () -> Unit,
     onOpenLiveTv: () -> Unit = {}
 ) {
     val context = LocalContext.current
@@ -86,104 +99,127 @@ fun HomeScreen(
 
     val netSpeed by rememberNetworkSpeed()
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.padding(vertical = 4.dp)
-                    ) {
-                        Image(
-                            painter = painterResource(id = R.drawable.ic_logo_header),
-                            contentDescription = "Circle Stream",
-                            modifier = Modifier
-                                .height(32.dp)
-                                .wrapContentWidth(),
-                            contentScale = ContentScale.Fit
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Surface(
-                            shape = RoundedCornerShape(10.dp),
-                            color = Color(0xFF1B5E20)
-                        ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.Speed,
-                                    contentDescription = "Net Speed",
-                                    tint = Color(0xFF69F0AE),
-                                    modifier = Modifier.size(10.dp)
-                                )
-                                Spacer(modifier = Modifier.width(3.dp))
-                                Text(
-                                    text = netSpeed,
-                                    fontSize = 10.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = Color(0xFF69F0AE),
-                                    maxLines = 1
-                                )
-                            }
-                        }
-                    }
-                },
-                actions = {
-                    IconButton(onClick = onOpenSearch) {
-                        Icon(Icons.Default.Search, contentDescription = "Search", tint = TextPrimary)
-                    }
-                    IconButton(onClick = onOpenLibrary) {
-                        Icon(Icons.Default.Bookmark, contentDescription = "Library", tint = TextPrimary)
-                    }
-                    IconButton(onClick = onOpenDownloads) {
-                        BadgedBox(
-                            badge = {
-                                if (activeDownloads.isNotEmpty()) {
-                                    Badge(containerColor = CircleRed) {
-                                        Text(
-                                            text = activeDownloads.size.toString(),
-                                            color = Color.White,
-                                            fontSize = 10.sp,
-                                            fontWeight = FontWeight.Bold
-                                        )
-                                    }
-                                }
-                            }
-                        ) {
-                            Icon(Icons.Default.Download, contentDescription = "Downloads", tint = TextPrimary)
-                        }
-                    }
-                    IconButton(onClick = onOpenSettings) {
-                        Icon(Icons.Default.Settings, contentDescription = "Settings", tint = TextPrimary)
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = CircleDarkBg
-                )
-            )
-        },
-        bottomBar = {
-            Surface(
-                color = CircleDarkBg,
+    var showLegalDialog by remember { mutableStateOf(false) }
+
+    if (showLegalDialog) {
+        TvLegalDisclaimerDialog(
+            isFirstLaunch = false,
+            onAcceptOrClose = { showLegalDialog = false }
+        )
+    }
+
+    // Auto-focus Live TV on launch for immediate remote readiness
+    val liveTvFocusRequester = remember { FocusRequester() }
+    LaunchedEffect(Unit) {
+        try {
+            liveTvFocusRequester.requestFocus()
+        } catch (_: Exception) {}
+    }
+
+    Row(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(CircleDarkBg)
+    ) {
+        // Left-Side TV Navigation Rail (3 Core Options: Home, Search, Library)
+        TvSideNavigationRail(
+            selectedDestination = TvNavDestination.HOME,
+            onNavigate = { destination ->
+                when (destination) {
+                    TvNavDestination.HOME -> { /* Already on Home */ }
+                    TvNavDestination.SEARCH -> onOpenSearch()
+                    TvNavDestination.LIBRARY -> onOpenLibrary()
+                }
+            }
+        )
+
+        // Main 10-Foot Content Area
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxHeight()
+        ) {
+            // Header Bar: Logo, Speed Badge, Active Downloads
+            Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .navigationBarsPadding()
+                    .padding(horizontal = 24.dp, vertical = 12.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                StartIoBanner()
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Image(
+                        painter = painterResource(id = R.drawable.ic_logo_header),
+                        contentDescription = "Circle Stream TV",
+                        modifier = Modifier
+                            .height(30.dp)
+                            .wrapContentWidth(),
+                        contentScale = ContentScale.Fit
+                    )
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = Color(0xFF1B5E20)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Speed,
+                                contentDescription = "Net Speed",
+                                tint = Color(0xFF69F0AE),
+                                modifier = Modifier.size(11.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = netSpeed,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFF69F0AE),
+                                maxLines = 1
+                            )
+                        }
+                    }
+                }
+
+                if (activeDownloads.isNotEmpty()) {
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = CircleRed.copy(alpha = 0.2f),
+                        border = BorderStroke(1.dp, CircleRed)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Download,
+                                contentDescription = null,
+                                tint = CircleRed,
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "${activeDownloads.size} Downloading",
+                                fontSize = 11.sp,
+                                color = Color.White,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                    }
+                }
             }
-        },
-        containerColor = CircleDarkBg
-    ) { padding ->
-        LazyVerticalGrid(
-            columns = GridCells.Adaptive(minSize = 320.dp),
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(padding),
-            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 36.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
-            horizontalArrangement = Arrangement.spacedBy(16.dp)
-        ) {
+
+            LazyVerticalGrid(
+                columns = GridCells.Adaptive(minSize = 320.dp),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .weight(1f),
+                contentPadding = PaddingValues(start = 20.dp, end = 24.dp, bottom = 36.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp),
+                horizontalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
             // Primary Experience Selector: Live TV vs Movies & Shows
             item(span = { GridItemSpan(maxLineSpan) }) {
                 Column(modifier = Modifier.padding(top = 2.dp, bottom = 4.dp)) {
@@ -198,7 +234,7 @@ fun HomeScreen(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
-                        // Live TV Card
+                        // Live TV Card (Auto-focused on TV launch)
                         HeroWatchModeCard(
                             title = "Live TV",
                             subtitle = "89+ Live Channels",
@@ -206,6 +242,7 @@ fun HomeScreen(
                             accentColor = Color(0xFFFF5252),
                             badgeBgColor = Color(0xFFB71C1C),
                             icon = Icons.Default.LiveTv,
+                            focusRequester = liveTvFocusRequester,
                             modifier = Modifier.weight(1f),
                             onClick = onOpenLiveTv
                         )
@@ -262,7 +299,57 @@ fun HomeScreen(
                     }
                 )
             }
+
+            // D-pad accessible Legal & Content Disclaimer Footer Button
+            item(span = { GridItemSpan(maxLineSpan) }) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 18.dp, bottom = 28.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    val legalInteractionSource = remember { MutableInteractionSource() }
+                    val isLegalFocused by legalInteractionSource.collectIsFocusedAsState()
+
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(
+                                color = if (isLegalFocused) CircleRed.copy(alpha = 0.25f) else Color(0xFF1E1E26)
+                            )
+                            .border(
+                                width = if (isLegalFocused) 1.5.dp else 1.dp,
+                                color = if (isLegalFocused) CircleRed else Color.White.copy(alpha = 0.12f),
+                                shape = RoundedCornerShape(8.dp)
+                            )
+                            .focusable(interactionSource = legalInteractionSource)
+                            .clickable(
+                                interactionSource = legalInteractionSource,
+                                indication = null,
+                                onClick = { showLegalDialog = true }
+                            )
+                            .padding(horizontal = 20.dp, vertical = 10.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Info,
+                            contentDescription = "Legal & Disclaimer",
+                            tint = if (isLegalFocused) Color.White else TextSecondary,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "Terms of Service & Content Disclaimer",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = if (isLegalFocused) Color.White else TextSecondary
+                        )
+                    }
+                }
+            }
         }
+    }
     }
 }
 
@@ -275,23 +362,47 @@ fun ProviderHubCard(
     onClick: () -> Unit
 ) {
     val meta = remember(provider.providerId) { getProviderVisualMeta(provider) }
+    var isFocused by remember { mutableStateOf(false) }
+    val scale by animateFloatAsState(
+        targetValue = if (isFocused) 1.04f else 1.0f,
+        animationSpec = tween(150),
+        label = "provider_card_scale"
+    )
 
     Card(
         modifier = Modifier
             .fillMaxWidth()
+            .zIndex(if (isFocused) 1f else 0f)
+            .graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+            }
             .clip(RoundedCornerShape(16.dp))
+            .onFocusChanged { isFocused = it.isFocused }
+            .focusable()
             .clickable { onClick() }
             .border(
-                width = 1.dp,
-                brush = Brush.horizontalGradient(
-                    colors = listOf(
-                        meta.accentColor.copy(alpha = 0.6f),
-                        CircleCard
+                width = if (isFocused) 2.5.dp else 1.dp,
+                brush = if (isFocused) {
+                    Brush.horizontalGradient(
+                        colors = listOf(
+                            meta.accentColor,
+                            CircleRed
+                        )
                     )
-                ),
+                } else {
+                    Brush.horizontalGradient(
+                        colors = listOf(
+                            meta.accentColor.copy(alpha = 0.6f),
+                            CircleCard
+                        )
+                    )
+                },
                 shape = RoundedCornerShape(16.dp)
             ),
-        colors = CardDefaults.cardColors(containerColor = CircleCard),
+        colors = CardDefaults.cardColors(
+            containerColor = if (isFocused) CircleCard.copy(alpha = 0.95f) else CircleCard
+        ),
         shape = RoundedCornerShape(16.dp)
     ) {
         Box(
@@ -465,23 +576,50 @@ fun HeroWatchModeCard(
     badgeBgColor: Color,
     icon: ImageVector,
     modifier: Modifier = Modifier,
+    focusRequester: FocusRequester? = null,
     onClick: () -> Unit
 ) {
+    var isFocused by remember { mutableStateOf(false) }
+    val scale by animateFloatAsState(
+        targetValue = if (isFocused) 1.05f else 1.0f,
+        animationSpec = tween(150),
+        label = "hero_card_scale"
+    )
+
     Card(
         modifier = modifier
+            .zIndex(if (isFocused) 1f else 0f)
+            .graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+            }
             .clip(RoundedCornerShape(16.dp))
+            .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
+            .onFocusChanged { isFocused = it.isFocused }
+            .focusable()
             .clickable { onClick() }
             .border(
-                width = 1.dp,
-                brush = Brush.verticalGradient(
-                    colors = listOf(
-                        accentColor.copy(alpha = 0.5f),
-                        CircleCard
+                width = if (isFocused) 2.5.dp else 1.dp,
+                brush = if (isFocused) {
+                    Brush.verticalGradient(
+                        colors = listOf(
+                            CircleRed,
+                            Color.White
+                        )
                     )
-                ),
+                } else {
+                    Brush.verticalGradient(
+                        colors = listOf(
+                            accentColor.copy(alpha = 0.5f),
+                            CircleCard
+                        )
+                    )
+                },
                 shape = RoundedCornerShape(16.dp)
             ),
-        colors = CardDefaults.cardColors(containerColor = CircleCard),
+        colors = CardDefaults.cardColors(
+            containerColor = if (isFocused) CircleCard.copy(alpha = 0.95f) else CircleCard
+        ),
         shape = RoundedCornerShape(16.dp)
     ) {
         Box(
@@ -577,10 +715,33 @@ fun HeroWatchModeCard(
 
 @Composable
 fun UnifiedMediaCard(item: MediaItemModel, onClick: () -> Unit) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val isFocused by interactionSource.collectIsFocusedAsState()
+
+    // 1. "Bump Up" Scale Animation
+    val scale by animateFloatAsState(
+        targetValue = if (isFocused) 1.1f else 1.0f,
+        animationSpec = tween(durationMillis = 200),
+        label = "card_scale"
+    )
+
+    // 2. "Light Stroke" Border Animation
+    val borderColor by animateColorAsState(
+        targetValue = if (isFocused) Color.White else Color.Transparent,
+        animationSpec = tween(durationMillis = 200),
+        label = "card_border"
+    )
+
     Column(
         modifier = Modifier
             .width(130.dp)
-            .clickable { onClick() }
+            .zIndex(if (isFocused) 1f else 0f) // Prevents scaling under neighboring cards
+            .scale(scale)
+            .border(width = if (isFocused) 3.dp else 0.dp, color = borderColor, shape = RoundedCornerShape(8.dp))
+            .focusable(interactionSource = interactionSource)
+            .clickable(interactionSource = interactionSource, indication = null) {
+                onClick()
+            }
     ) {
         Box(
             modifier = Modifier
@@ -629,8 +790,8 @@ fun UnifiedMediaCard(item: MediaItemModel, onClick: () -> Unit) {
         Text(
             text = item.title,
             fontSize = 13.sp,
-            fontWeight = FontWeight.Medium,
-            color = TextPrimary,
+            fontWeight = if (isFocused) FontWeight.Bold else FontWeight.Medium,
+            color = if (isFocused) Color.White else TextPrimary,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis
         )
@@ -646,54 +807,16 @@ fun UnifiedMediaCard(item: MediaItemModel, onClick: () -> Unit) {
 
 @Composable
 fun MediaCard(post: PostSummary, onClick: () -> Unit) {
-    Column(
-        modifier = Modifier
-            .width(130.dp)
-            .clickable { onClick() }
-    ) {
-        Box(
-            modifier = Modifier
-                .width(130.dp)
-                .height(190.dp)
-                .clip(RoundedCornerShape(8.dp))
-                .background(CircleCard)
-        ) {
-            AsyncImage(
-                model = post.getPosterUrl(),
-                contentDescription = post.displayTitle,
-                contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize()
-            )
-            if (!post.quality.isNullOrBlank()) {
-                Surface(
-                    color = Color.Black.copy(alpha = 0.75f),
-                    shape = RoundedCornerShape(topStart = 4.dp),
-                    modifier = Modifier.align(Alignment.BottomEnd)
-                ) {
-                    Text(
-                        text = post.quality,
-                        fontSize = 9.sp,
-                        color = Color.White,
-                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
-                    )
-                }
-            }
-        }
-        Spacer(modifier = Modifier.height(6.dp))
-        Text(
-            text = post.displayTitle,
-            fontSize = 13.sp,
-            fontWeight = FontWeight.Medium,
-            color = TextPrimary,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis
+    val model = remember(post) {
+        MediaItemModel(
+            id = post.id.toString(),
+            title = post.displayTitle,
+            posterUrl = post.getPosterUrl(),
+            quality = post.quality,
+            releaseYear = post.year,
+            providerId = "circleftp",
+            isBdix = true
         )
-        if (!post.year.isNullOrBlank()) {
-            Text(
-                text = post.year,
-                fontSize = 11.sp,
-                color = TextSecondary
-            )
-        }
     }
+    UnifiedMediaCard(item = model, onClick = onClick)
 }

@@ -1,5 +1,6 @@
 package com.circleftp.stream
 
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
@@ -7,10 +8,15 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -19,6 +25,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -36,49 +43,68 @@ import com.circleftp.stream.data.iptv.IptvStreamResolver
 import com.circleftp.stream.data.provider.ProviderRegistry
 import com.circleftp.stream.player.ActivePlayerSession
 import com.circleftp.stream.ui.catalog.CatalogScreen
-import com.circleftp.stream.ui.category.CategoryScreen
+import com.circleftp.stream.ui.components.TvLaunchAdDialog
+import com.circleftp.stream.ui.components.TvLegalDisclaimerDialog
 import com.circleftp.stream.ui.detail.DetailScreen
-import com.circleftp.stream.ui.download.DownloadsScreen
 import com.circleftp.stream.ui.home.HomeScreen
 import com.circleftp.stream.ui.library.LibraryScreen
+import android.view.KeyEvent
+import com.circleftp.stream.ui.livetv.LivePlayerView
+import com.circleftp.stream.ui.livetv.LiveTvManager
 import com.circleftp.stream.ui.livetv.LiveTvScreen
 import com.circleftp.stream.ui.player.PlayerScreen
 import com.circleftp.stream.ui.search.SearchScreen
-import com.circleftp.stream.ui.settings.SettingsScreen
 import com.circleftp.stream.ui.theme.CircleCard
 import com.circleftp.stream.ui.theme.CircleRed
 import com.circleftp.stream.ui.theme.CircleStreamTheme
 import com.circleftp.stream.ui.theme.TextPrimary
 import com.circleftp.stream.ui.theme.TextSecondary
 import com.circleftp.stream.updater.AppUpdater
-import com.circleftp.stream.updater.AutoUpdateDialogHost
-import com.circleftp.stream.updater.CircleUpdateManager
 import com.circleftp.stream.utils.AdManager
-import com.startapp.sdk.adsbase.StartAppAd
-import com.startapp.sdk.adsbase.StartAppSDK
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
+
+    override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
+        // Pass through volume keys to system audio
+        if (keyCode == KeyEvent.KEYCODE_VOLUME_UP ||
+            keyCode == KeyEvent.KEYCODE_VOLUME_DOWN ||
+            keyCode == KeyEvent.KEYCODE_VOLUME_MUTE
+        ) {
+            return super.onKeyDown(keyCode, event)
+        }
+
+        // Intercept TV remote actions when the live player screen is active
+        if (LiveTvManager.isLivePlayerActive) {
+            if (LiveTvManager.handleKeyDown(keyCode, event)) {
+                return true
+            }
+        }
+
+        return super.onKeyDown(keyCode, event)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Runtime Security & Anti-Crack Protection (Anti-tamper, Anti-Frida, Signature verification)
-        if (com.circleftp.stream.security.AntiReverseGuard.isDebuggerConnected() ||
-            com.circleftp.stream.security.AntiReverseGuard.isFridaActive() ||
-            com.circleftp.stream.security.AntiReverseGuard.isFridaPortOpen() ||
-            !com.circleftp.stream.security.AntiReverseGuard.isSignatureValid(this)
-        ) {
-            android.widget.Toast.makeText(this, "Security Alert: App integrity compromised", android.widget.Toast.LENGTH_LONG).show()
-            finish()
-            return
+        // Runtime Security & Anti-Crack Protection off the main UI thread
+        lifecycleScope.launch(Dispatchers.IO) {
+            if (com.circleftp.stream.security.AntiReverseGuard.isDebuggerConnected() ||
+                com.circleftp.stream.security.AntiReverseGuard.isFridaActive() ||
+                com.circleftp.stream.security.AntiReverseGuard.isFridaPortOpen() ||
+                !com.circleftp.stream.security.AntiReverseGuard.isSignatureValid(this@MainActivity)
+            ) {
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(this@MainActivity, "Security Alert: App integrity compromised", Toast.LENGTH_LONG).show()
+                    finish()
+                }
+            }
         }
 
         enableEdgeToEdge()
-
-        // Initialize Start.io Monetization SDK
-        StartAppSDK.init(this, "210959821", false)
-        StartAppSDK.setTestAdsEnabled(BuildConfig.DEBUG)
-        StartAppAd.disableSplash()
 
         setContent {
             CircleStreamTheme {
@@ -94,7 +120,6 @@ fun CircleStreamApp() {
     val scope = rememberCoroutineScope()
     val navController = rememberNavController()
     val apiClient = remember { CircleFtpApiClient() }
-    val updateManager = remember { CircleUpdateManager(context) }
     val configManager = remember { ConfigManager.getInstance(context) }
     val providerRegistry = remember { ProviderRegistry.getInstance(context, configManager) }
 
@@ -104,7 +129,6 @@ fun CircleStreamApp() {
     LaunchedEffect(Unit) {
         // Asynchronously fetch remote provider domains
         configManager.fetchRemoteConfig()
-        updateManager.checkForUpdates(silentIfUpToDate = true)
 
         // Firebase Remote Config Auto-Update check
         AppUpdater.checkForUpdates(currentVersionCode = BuildConfig.VERSION_CODE.toLong()) { apkUrl ->
@@ -112,10 +136,40 @@ fun CircleStreamApp() {
         }
     }
 
-    AutoUpdateDialogHost(updateManager = updateManager)
+    // First-Launch Legal & Content Disclaimer Dialog
+    val prefs = remember { context.getSharedPreferences("circle_stream_prefs", Context.MODE_PRIVATE) }
+    var showFirstLaunchLegal by remember {
+        mutableStateOf(!prefs.getBoolean("legal_accepted_v1", false))
+    }
+
+    if (showFirstLaunchLegal) {
+        TvLegalDisclaimerDialog(
+            isFirstLaunch = true,
+            onAcceptOrClose = {
+                prefs.edit().putBoolean("legal_accepted_v1", true).apply()
+                showFirstLaunchLegal = false
+            }
+        )
+    }
+
+    // Android TV Intro Launch Ad Dialog (Shows exactly once per session after legal check)
+    var showLaunchAd by remember { mutableStateOf(AdManager.shouldShowLaunchAd()) }
+    if (!showFirstLaunchLegal && showLaunchAd) {
+        TvLaunchAdDialog(
+            onDismiss = {
+                showLaunchAd = false
+                AdManager.markLaunchAdShown()
+            }
+        )
+    }
 
     // Persistent Mandatory Update Dialog via Firebase Remote Config
     updateDownloadUrl?.let { apkUrl ->
+        val safeUrl = remember(apkUrl) { AppUpdater.enforceHttps(apkUrl) }
+        var isDownloading by remember { mutableStateOf(false) }
+        var progressPercent by remember { mutableStateOf(0) }
+        var downloadError by remember { mutableStateOf<String?>(null) }
+
         AlertDialog(
             onDismissRequest = {
                 // Persistent dialog: Dismissal disabled for mandatory updates
@@ -132,38 +186,64 @@ fun CircleStreamApp() {
                 )
             },
             text = {
-                Text(
-                    text = "A new version of Circle Stream is available!",
-                    fontSize = 15.sp,
-                    color = TextSecondary
-                )
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Text(
+                        text = if (isDownloading) {
+                            "Downloading update... $progressPercent%"
+                        } else {
+                            "A new version of Circle Stream is available! Please update to continue."
+                        },
+                        fontSize = 15.sp,
+                        color = TextSecondary
+                    )
+                    if (isDownloading) {
+                        LinearProgressIndicator(
+                            progress = { progressPercent / 100f },
+                            modifier = Modifier.fillMaxWidth().height(6.dp),
+                            color = CircleRed,
+                            trackColor = Color.DarkGray
+                        )
+                    }
+                    if (downloadError != null) {
+                        Text(
+                            text = downloadError ?: "",
+                            fontSize = 12.sp,
+                            color = CircleRed
+                        )
+                    }
+                }
             },
             confirmButton = {
                 Button(
                     onClick = {
-                        val trimmedUrl = apkUrl.trim()
-                        val safeUrl = if (trimmedUrl.startsWith("http://", ignoreCase = true) || 
-                            trimmedUrl.startsWith("https://", ignoreCase = true)
-                        ) {
-                            trimmedUrl
-                        } else {
-                            "https://$trimmedUrl"
-                        }
-
-                        runCatching {
-                            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(safeUrl)).apply {
-                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                            }
-                            context.startActivity(intent)
-                        }.onFailure {
-                            Toast.makeText(context, "Invalid download link.", Toast.LENGTH_SHORT).show()
+                        if (!isDownloading) {
+                            isDownloading = true
+                            downloadError = null
+                            AppUpdater.downloadAndInstall(
+                                context = context,
+                                apkUrl = safeUrl,
+                                onProgress = { progress ->
+                                    progressPercent = progress
+                                },
+                                onError = { error ->
+                                    isDownloading = false
+                                    downloadError = "Download failed: $error. Opening browser fallback..."
+                                    Toast.makeText(context, "Download failed, opening browser...", Toast.LENGTH_SHORT).show()
+                                }
+                            )
                         }
                     },
-                    colors = ButtonDefaults.buttonColors(containerColor = CircleRed),
+                    enabled = !isDownloading,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = CircleRed,
+                        disabledContainerColor = CircleRed.copy(alpha = 0.5f)
+                    ),
                     shape = RoundedCornerShape(8.dp)
                 ) {
                     Text(
-                        text = "Update Now",
+                        text = if (isDownloading) "Downloading ($progressPercent%)..." else "Update Now",
                         fontWeight = FontWeight.Bold,
                         color = Color.White
                     )
@@ -183,14 +263,16 @@ fun CircleStreamApp() {
                 apiClient = apiClient,
                 onSelectProvider = { providerId ->
                     if (providerId == "iptvidn") {
-                        navController.navigate("livetv")
+                        LiveTvManager.resumeLastChannelOrDefault(context)
+                        navController.navigate("live_player")
                     } else {
                         navController.navigate("catalog/$providerId")
                     }
                 },
                 onSelectMedia = { providerId, mediaId ->
                     if (providerId == "iptvidn") {
-                        navController.navigate("livetv")
+                        LiveTvManager.playChannelById(mediaId)
+                        navController.navigate("live_player")
                     } else {
                         navController.navigate("detail/$providerId/$mediaId")
                     }
@@ -225,46 +307,25 @@ fun CircleStreamApp() {
                 onOpenSearch = {
                     navController.navigate("search")
                 },
-                onOpenCategories = {
-                    navController.navigate("categories")
-                },
                 onOpenLibrary = {
                     navController.navigate("library")
                 },
-                onOpenDownloads = {
-                    navController.navigate("downloads")
-                },
-                onOpenSettings = {
-                    navController.navigate("settings")
-                },
                 onOpenLiveTv = {
-                    navController.navigate("livetv")
+                    LiveTvManager.resumeLastChannelOrDefault(context)
+                    navController.navigate("live_player")
                 }
             )
         }
 
         composable("livetv") {
-            LiveTvScreen(
-                onBack = { navController.popBackStack() },
-                onSelectChannel = { channel ->
-                    scope.launch {
-                        val resolved = IptvStreamResolver.resolveStream(channel.id)
-                        val streamUrl = resolved?.primaryStreamUrl
-                        if (!streamUrl.isNullOrBlank()) {
-                            ActivePlayerSession.set(
-                                mediaId = "iptv_${channel.id}",
-                                title = channel.name,
-                                streamUrl = streamUrl,
-                                isSeries = false,
-                                providerId = "iptvidn",
-                                headers = resolved.headers
-                            )
-                            navController.navigate("player")
-                        } else {
-                            Toast.makeText(context, "Channel stream currently unavailable at source", Toast.LENGTH_SHORT).show()
-                        }
-                    }
-                }
+            LivePlayerView(
+                onBack = { navController.popBackStack() }
+            )
+        }
+
+        composable("live_player") {
+            LivePlayerView(
+                onBack = { navController.popBackStack() }
             )
         }
 
@@ -337,22 +398,6 @@ fun CircleStreamApp() {
             )
         }
 
-        composable("categories") {
-            CategoryScreen(
-                apiClient = apiClient,
-                onBack = { navController.popBackStack() },
-                onSelectPost = { postId ->
-                    navController.navigate("detail/circleftp/$postId")
-                }
-            )
-        }
-
-        composable("settings") {
-            SettingsScreen(
-                onBack = { navController.popBackStack() }
-            )
-        }
-
         composable("library") {
             LibraryScreen(
                 onBack = { navController.popBackStack() },
@@ -392,16 +437,6 @@ fun CircleStreamApp() {
                 },
                 onSelectPostId = { postId ->
                     navController.navigate("detail/$postId")
-                }
-            )
-        }
-
-        composable("downloads") {
-            DownloadsScreen(
-                onBack = { navController.popBackStack() },
-                onPlayOffline = { title, filePath ->
-                    ActivePlayerSession.set(title, filePath)
-                    navController.navigate("player")
                 }
             )
         }

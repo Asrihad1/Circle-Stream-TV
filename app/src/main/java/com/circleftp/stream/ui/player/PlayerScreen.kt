@@ -14,6 +14,9 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.OptIn
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
@@ -22,7 +25,11 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.focusable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.rememberTransformableState
@@ -39,8 +46,20 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.scale
+import androidx.compose.ui.zIndex
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusProperties
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
@@ -69,6 +88,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import coil.compose.AsyncImage
 import com.circleftp.stream.R
 import com.circleftp.stream.data.api.CircleFtpApiClient
+import com.circleftp.stream.data.local.CircleDatabase
+import com.circleftp.stream.data.local.WatchLaterEntity
+import com.circleftp.stream.data.provider.circle.CircleFtpFolderResolver
 import com.circleftp.stream.data.iptv.IptvCatalog
 import com.circleftp.stream.data.iptv.IptvChannel
 import com.circleftp.stream.data.iptv.IptvStreamResolver
@@ -100,17 +122,10 @@ fun PlayerScreen(
 
     val scope = rememberCoroutineScope()
     val apiClient = remember { CircleFtpApiClient() }
+    val db = remember { CircleDatabase.getInstance(context) }
+    val watchLaterDao = remember { db.watchLaterDao() }
     var showCastDialog by remember { mutableStateOf(false) }
-    var showExploreDrawer by remember { mutableStateOf(false) }
-    var explorePosts by remember { mutableStateOf<List<PostSummary>>(emptyList()) }
-    var isExploreLoading by remember { mutableStateOf(false) }
-
-    LaunchedEffect(Unit) {
-        try {
-            val home = apiClient.getHomePage()
-            explorePosts = home.latestPost + home.mostVisitedPosts
-        } catch (_: Exception) {}
-    }
+    var showSettingsModal by remember { mutableStateOf(false) }
 
     // App Security Protection Verification
     LaunchedEffect(Unit) {
@@ -128,9 +143,23 @@ fun PlayerScreen(
     var showSubtitleDialog by remember { mutableStateOf(false) }
     var showDecoderDialog by remember { mutableStateOf(false) }
     var showAspectDialog by remember { mutableStateOf(false) }
+    var showSpeedDialog by remember { mutableStateOf(false) }
+    var showQualityDialog by remember { mutableStateOf(false) }
+    var currentSpeed by remember { mutableFloatStateOf(1.0f) }
     var showEpisodeDrawer by remember { mutableStateOf(false) }
     var showChannelDrawer by remember { mutableStateOf(false) }
     var channelSearchQuery by remember { mutableStateOf("") }
+
+    // Auto-resolve folder URLs ending in '/' or without media extension (PRD 5.1)
+    LaunchedEffect(activeStreamUrl) {
+        if (!activeStreamUrl.isNullOrBlank() && (activeStreamUrl.endsWith("/") || !CircleFtpFolderResolver.hasVideoExtension(activeStreamUrl))) {
+            val resolved = CircleFtpFolderResolver.resolve(activeStreamUrl)
+            if (resolved != activeStreamUrl && resolved.isNotBlank()) {
+                activeStreamUrl = resolved
+                ActivePlayerSession.streamUrl = resolved
+            }
+        }
+    }
 
     val isLiveIptv = remember(activeStreamUrl) {
         ActivePlayerSession.providerId == "iptvidn" || activeStreamUrl.contains(".m3u8")
@@ -207,15 +236,6 @@ fun PlayerScreen(
     var autoPlayNextEnabled by remember { mutableStateOf(settings.autoPlayNextEpisode) }
     var videoWidth by remember { mutableIntStateOf(1920) }
     var videoHeight by remember { mutableIntStateOf(1080) }
-
-    // Controls 3.5-second auto-hide timer
-    LaunchedEffect(areControlsVisible) {
-        if (areControlsVisible) {
-            delay(3500)
-            areControlsVisible = false
-            playerViewRef?.hideController()
-        }
-    }
 
     // Auto-load series playlist in background if not already populated
     LaunchedEffect(Unit) {
@@ -459,6 +479,7 @@ fun PlayerScreen(
             )
         }
     }
+    val isWatchLater by watchLaterDao.isWatchLater(canonicalMediaId).collectAsState(initial = false)
 
     if (!isLiveIptv) {
         RememberPlaybackTracker(
@@ -502,14 +523,174 @@ fun PlayerScreen(
         }
     }
 
-    BackHandler {
+    val tvPlayerFocusRequester = remember { FocusRequester() }
+    val backButtonFocusRequester = remember { FocusRequester() }
+    val watchLaterFocusRequester = remember { FocusRequester() }
+    val seekBarFocusRequester = remember { FocusRequester() }
+    val playPauseFocusRequester = remember { FocusRequester() }
+    val skipBackFocusRequester = remember { FocusRequester() }
+    val skipForwardFocusRequester = remember { FocusRequester() }
+    val settingsFocusRequester = remember { FocusRequester() }
+    val fullscreenFocusRequester = remember { FocusRequester() }
+    val currentEpFocusRequester = remember { FocusRequester() }
+
+    // Auto-focus current episode when drawer opens; restore focus to Play/Pause on drawer close or when controls become visible
+    LaunchedEffect(showEpisodeDrawer, areControlsVisible) {
+        if (showEpisodeDrawer) {
+            delay(120)
+            try {
+                currentEpFocusRequester.requestFocus()
+            } catch (_: Exception) {}
+        } else if (areControlsVisible) {
+            delay(50)
+            try {
+                playPauseFocusRequester.requestFocus()
+            } catch (_: Exception) {}
+        } else {
+            delay(50)
+            try {
+                tvPlayerFocusRequester.requestFocus()
+            } catch (_: Exception) {}
+        }
+    }
+
+    var lastInteractionTime by remember { mutableLongStateOf(System.currentTimeMillis()) }
+
+    // Auto-hide controls after 5 seconds of inactivity and immediately return focus to video surface
+    LaunchedEffect(areControlsVisible, lastInteractionTime) {
+        if (areControlsVisible && !showSettingsModal && !showAudioDialog &&
+            !showSubtitleDialog && !showDecoderDialog && !showSpeedDialog &&
+            !showAspectDialog && !showEpisodeDrawer && !showChannelDrawer && !showQualityDialog
+        ) {
+            delay(5000)
+            areControlsVisible = false
+            playerViewRef?.hideController()
+        }
+    }
+
+    fun handleTeardown() {
+        areControlsVisible = false
         onClose()
+    }
+
+    BackHandler {
+        if (showSettingsModal) {
+            showSettingsModal = false
+        } else if (showAudioDialog) {
+            showAudioDialog = false
+        } else if (showSubtitleDialog) {
+            showSubtitleDialog = false
+        } else if (showSpeedDialog) {
+            showSpeedDialog = false
+        } else if (showDecoderDialog) {
+            showDecoderDialog = false
+        } else if (showAspectDialog) {
+            showAspectDialog = false
+        } else if (showCastDialog) {
+            showCastDialog = false
+        } else if (showEpisodeDrawer) {
+            showEpisodeDrawer = false
+        } else if (showChannelDrawer) {
+            showChannelDrawer = false
+        } else if (areControlsVisible) {
+            areControlsVisible = false
+        } else {
+            handleTeardown()
+        }
     }
 
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(Color.Black)
+            .focusRequester(tvPlayerFocusRequester)
+            .focusable()
+            .onKeyEvent { keyEvent ->
+                if (showSettingsModal || showAudioDialog || showSubtitleDialog || showSpeedDialog ||
+                    showDecoderDialog || showAspectDialog || showCastDialog || showEpisodeDrawer ||
+                    showChannelDrawer || showQualityDialog
+                ) {
+                    return@onKeyEvent false
+                }
+
+                if (keyEvent.type == KeyEventType.KeyDown) {
+                    lastInteractionTime = System.currentTimeMillis()
+                    if (areControlsVisible) {
+                        when (keyEvent.key) {
+                            Key.Back, Key.Escape -> {
+                                areControlsVisible = false
+                                true
+                            }
+                            Key.MediaPlayPause -> {
+                                if (player.isPlaying) player.pause() else player.play()
+                                true
+                            }
+                            Key.MediaPlay -> {
+                                player.play()
+                                true
+                            }
+                            Key.MediaPause -> {
+                                player.pause()
+                                true
+                            }
+                            // Unblock D-pad navigation & clicking when controls overlay is visible
+                            Key.DirectionCenter, Key.Enter, Key.NumPadEnter,
+                            Key.DirectionLeft, Key.DirectionRight,
+                            Key.DirectionUp, Key.DirectionDown -> {
+                                false
+                            }
+                            else -> false
+                        }
+                    } else {
+                        when (keyEvent.key) {
+                            Key.DirectionCenter, Key.Enter, Key.NumPadEnter, Key.MediaPlayPause -> {
+                                if (player.isPlaying) {
+                                    player.pause()
+                                    areControlsVisible = true
+                                } else {
+                                    player.play()
+                                    areControlsVisible = false
+                                }
+                                true
+                            }
+                            Key.MediaPlay -> {
+                                player.play()
+                                areControlsVisible = false
+                                true
+                            }
+                            Key.MediaPause -> {
+                                player.pause()
+                                areControlsVisible = true
+                                true
+                            }
+                            Key.DirectionLeft, Key.MediaRewind, Key.MediaStepBackward -> {
+                                val stepMs = settings.seekIntervalSeconds * 1000L
+                                val newPos = (player.currentPosition - stepMs).coerceAtLeast(0L)
+                                player.seekTo(newPos)
+                                doubleTapFeedback = "⏪ ${settings.seekIntervalSeconds} sec"
+                                areControlsVisible = true
+                                true
+                            }
+                            Key.DirectionRight, Key.MediaFastForward, Key.MediaStepForward -> {
+                                val stepMs = settings.seekIntervalSeconds * 1000L
+                                val duration = player.duration
+                                val newPos = player.currentPosition + stepMs
+                                player.seekTo(if (duration > 0) newPos.coerceAtMost(duration) else newPos)
+                                doubleTapFeedback = "${settings.seekIntervalSeconds} sec ⏩"
+                                areControlsVisible = true
+                                true
+                            }
+                            Key.DirectionUp, Key.DirectionDown -> {
+                                areControlsVisible = true
+                                true
+                            }
+                            else -> false
+                        }
+                    }
+                } else {
+                    false
+                }
+            }
             .transformable(state = transformState, enabled = settings.pinchZoomEnabled)
             .pointerInput(Unit) {
                 detectTapGestures(
@@ -545,12 +726,6 @@ fun PlayerScreen(
                     val x = change.position.x
                     val y = change.position.y
                     val deltaY = -dragAmount.y // Drag up is positive, drag down is negative
-
-                    // YouTube-style: Pull up from bottom to explore videos while playing
-                    if (y > screenHeight * 0.65f && deltaY > 35f) {
-                        showExploreDrawer = true
-                        return@detectDragGestures
-                    }
 
                     if (x < screenWidth * 0.5f) {
                         // Left side swipe: Brightness control
@@ -671,7 +846,7 @@ fun PlayerScreen(
             )
         }
 
-        // Overlay: Professional PotPlayer-Style Top Header Bar (Auto-hides with controls)
+        // Overlay: Top-Left Actions (Back Arrow + Watch Later) & Media Title (Auto-hides with controls)
         AnimatedVisibility(
             visible = areControlsVisible,
             enter = fadeIn() + slideInVertically { -it },
@@ -681,18 +856,82 @@ fun PlayerScreen(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(start = 148.dp, end = 16.dp, top = 12.dp, bottom = 12.dp),
+                    .padding(horizontal = 24.dp, vertical = 14.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
-                    IconButton(
-                        onClick = onClose,
-                        colors = IconButtonDefaults.iconButtonColors(containerColor = Color.Black.copy(alpha = 0.65f))
-                    ) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = TextPrimary)
+                // Top-Left Action Buttons: Back and Watch Later
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    TvPlayerControlButton(
+                        text = "Back",
+                        icon = Icons.AutoMirrored.Filled.ArrowBack,
+                        onClick = { handleTeardown() },
+                        modifier = Modifier
+                            .focusRequester(backButtonFocusRequester)
+                            .focusProperties {
+                                right = watchLaterFocusRequester
+                                down = if (!isLiveIptv && totalDurationMs > 0L) seekBarFocusRequester else playPauseFocusRequester
+                            }
+                    )
+
+                    TvPlayerControlButton(
+                        text = if (isWatchLater) "Saved" else "Watch Later",
+                        icon = if (isWatchLater) Icons.Default.Bookmark else Icons.Default.BookmarkBorder,
+                        onClick = {
+                            lastInteractionTime = System.currentTimeMillis()
+                            scope.launch {
+                                if (isWatchLater) {
+                                    watchLaterDao.removeFromWatchLater(canonicalMediaId)
+                                    Toast.makeText(context, "Removed from Watch Later", Toast.LENGTH_SHORT).show()
+                                } else {
+                                    val entity = WatchLaterEntity(
+                                        mediaId = canonicalMediaId,
+                                        title = activeTitle,
+                                        posterUrl = ActivePlayerSession.posterUrl,
+                                        streamUrl = activeStreamUrl,
+                                        isSeries = ActivePlayerSession.isSeries
+                                    )
+                                    watchLaterDao.addToWatchLater(entity)
+                                    Toast.makeText(context, "Saved to Watch Later", Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                        },
+                        modifier = Modifier
+                            .focusRequester(watchLaterFocusRequester)
+                            .focusProperties {
+                                left = backButtonFocusRequester
+                                down = if (!isLiveIptv && totalDurationMs > 0L) seekBarFocusRequester else playPauseFocusRequester
+                            }
+                    )
+
+                    if (ActivePlayerSession.playlist.isNotEmpty()) {
+                        TvPlayerControlButton(
+                            text = "Episodes",
+                            icon = Icons.Default.VideoLibrary,
+                            onClick = {
+                                showEpisodeDrawer = !showEpisodeDrawer
+                                lastInteractionTime = System.currentTimeMillis()
+                            }
+                        )
                     }
-                    Spacer(modifier = Modifier.width(10.dp))
+
+                    if (isLiveIptv) {
+                        TvPlayerControlButton(
+                            text = "Channels",
+                            icon = Icons.Default.LiveTv,
+                            onClick = {
+                                showChannelDrawer = !showChannelDrawer
+                                lastInteractionTime = System.currentTimeMillis()
+                            }
+                        )
+                    }
+                }
+
+                // Media Title & Badges at Top-Right
+                Row(verticalAlignment = Alignment.CenterVertically) {
                     Surface(
                         color = Color.Black.copy(alpha = 0.65f),
                         shape = RoundedCornerShape(8.dp)
@@ -702,7 +941,7 @@ fun PlayerScreen(
                             color = TextPrimary,
                             fontSize = 14.sp,
                             fontWeight = FontWeight.Bold,
-                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp),
                             maxLines = 1
                         )
                     }
@@ -711,7 +950,7 @@ fun PlayerScreen(
                         Surface(
                             color = Color(0xFFB71C1C),
                             shape = RoundedCornerShape(6.dp),
-                            modifier = Modifier.padding(start = 6.dp)
+                            modifier = Modifier.padding(start = 8.dp)
                         ) {
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
@@ -731,113 +970,6 @@ fun PlayerScreen(
                                     fontWeight = FontWeight.Black
                                 )
                             }
-                        }
-                    }
-                }
-
-                // Controls: Aspect Ratio, Audio, Subtitle, Cast, Download
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    if (isLiveIptv) {
-                        IconButton(
-                            onClick = { showChannelDrawer = !showChannelDrawer },
-                            colors = IconButtonDefaults.iconButtonColors(
-                                containerColor = if (showChannelDrawer) Color(0xFFFF5252) else Color.Black.copy(alpha = 0.65f)
-                            ),
-                            modifier = Modifier.padding(end = 6.dp)
-                        ) {
-                            Icon(Icons.Default.LiveTv, contentDescription = "Channels", tint = Color.White)
-                        }
-                    }
-
-                    // Aspect Ratio Selector
-                    IconButton(
-                        onClick = { showAspectDialog = true },
-                        colors = IconButtonDefaults.iconButtonColors(containerColor = Color.Black.copy(alpha = 0.65f))
-                    ) {
-                        Icon(Icons.Default.AspectRatio, contentDescription = "Aspect Ratio", tint = TextPrimary)
-                    }
-                    Spacer(modifier = Modifier.width(4.dp))
-
-                    // Audio Language Track Selector
-                    IconButton(
-                        onClick = {
-                            audioTracks = TrackSelectorHelper.getAudioTracks(player)
-                            showAudioDialog = true
-                        },
-                        colors = IconButtonDefaults.iconButtonColors(containerColor = Color.Black.copy(alpha = 0.65f))
-                    ) {
-                        Icon(Icons.Default.Audiotrack, contentDescription = "Audio Track", tint = TextPrimary)
-                    }
-                    Spacer(modifier = Modifier.width(4.dp))
-
-                    // Subtitle Selector
-                    IconButton(
-                        onClick = {
-                            subtitleTracks = TrackSelectorHelper.getSubtitleTracks(player)
-                            showSubtitleDialog = true
-                        },
-                        colors = IconButtonDefaults.iconButtonColors(containerColor = Color.Black.copy(alpha = 0.65f))
-                    ) {
-                        Icon(Icons.Default.Subtitles, contentDescription = "Subtitles", tint = TextPrimary)
-                    }
-                    Spacer(modifier = Modifier.width(4.dp))
-
-                    // Play in External Player (VLC / MX)
-                    IconButton(
-                        onClick = {
-                            val intent = Intent(Intent.ACTION_VIEW).apply {
-                                setDataAndType(Uri.parse(activeStreamUrl), "video/*")
-                                putExtra("title", activeTitle)
-                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                            }
-                            try {
-                                context.startActivity(Intent.createChooser(intent, "Play in VLC / MX Player..."))
-                            } catch (_: Exception) {
-                                try {
-                                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("market://details?id=org.videolan.vlc")))
-                                } catch (_: Exception) {
-                                    Toast.makeText(context, "Install VLC from Play Store for external playback", Toast.LENGTH_SHORT).show()
-                                }
-                            }
-                        },
-                        colors = IconButtonDefaults.iconButtonColors(containerColor = Color.Black.copy(alpha = 0.65f))
-                    ) {
-                        Icon(Icons.Default.OpenInNew, contentDescription = "Play in VLC / MX", tint = TextPrimary)
-                    }
-                    Spacer(modifier = Modifier.width(4.dp))
-
-                    // Cast to TV
-                    IconButton(
-                        onClick = { showCastDialog = true },
-                        colors = IconButtonDefaults.iconButtonColors(containerColor = Color.Black.copy(alpha = 0.65f))
-                    ) {
-                        Icon(Icons.Default.Cast, contentDescription = "Cast to TV", tint = TextPrimary)
-                    }
-                    Spacer(modifier = Modifier.width(4.dp))
-
-                    // Download to Local Storage
-                    IconButton(
-                        onClick = {
-                            val id = CircleDownloadManager.download(context, activeTitle, activeStreamUrl)
-                            if (id != -1L) {
-                                showGestureIndicator = "Downloading: Track progress in Downloads tab"
-                            }
-                        },
-                        colors = IconButtonDefaults.iconButtonColors(containerColor = Color.Black.copy(alpha = 0.65f))
-                    ) {
-                        Icon(Icons.Default.Download, contentDescription = "Download Movie", tint = TextPrimary)
-                    }
-
-                    // Episodes Drawer Button (For series or multi-file movies)
-                    if (ActivePlayerSession.playlist.isNotEmpty()) {
-                        Spacer(modifier = Modifier.width(4.dp))
-                        IconButton(
-                            onClick = { showEpisodeDrawer = !showEpisodeDrawer },
-                            colors = IconButtonDefaults.iconButtonColors(
-                                containerColor = if (showEpisodeDrawer) CircleRed else Color.Black.copy(alpha = 0.65f)
-                            )
-                        ) {
-                            Icon(Icons.Default.VideoLibrary, contentDescription = "Episodes", tint = TextPrimary)
                         }
                     }
                 }
@@ -1128,6 +1260,79 @@ fun PlayerScreen(
             )
         }
 
+        // Player Settings Modal: exactly 4 options, each opens its existing dialog
+        if (showSettingsModal) {
+            val firstItemFocus = remember { FocusRequester() }
+            LaunchedEffect(Unit) {
+                delay(50)
+                try { firstItemFocus.requestFocus() } catch (_: Exception) {}
+            }
+            fun openFromSettings(open: () -> Unit) {
+                showSettingsModal = false
+                open()
+                lastInteractionTime = System.currentTimeMillis()
+            }
+            AlertDialog(
+                onDismissRequest = { showSettingsModal = false },
+                title = { Text("Settings", fontWeight = FontWeight.Bold, color = TextPrimary) },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        TvSettingsMenuItem("Audio Track", Icons.Default.Audiotrack, Modifier.focusRequester(firstItemFocus)) {
+                            openFromSettings { showAudioDialog = true }
+                        }
+                        TvSettingsMenuItem("Subtitles (CC)", Icons.Default.ClosedCaption) {
+                            openFromSettings { showSubtitleDialog = true }
+                        }
+                        TvSettingsMenuItem("Video Quality", Icons.Default.HighQuality) {
+                            openFromSettings { showQualityDialog = true }
+                        }
+                        TvSettingsMenuItem("Playback Speed", Icons.Default.Speed) {
+                            openFromSettings { showSpeedDialog = true }
+                        }
+                    }
+                },
+                confirmButton = {},
+                containerColor = CircleSurface,
+                shape = RoundedCornerShape(12.dp)
+            )
+        }
+
+        // Video Quality Dialog: caps max video height via track selection params ("Auto" clears the cap)
+        if (showQualityDialog) {
+            val heights = remember(showQualityDialog) {
+                player.currentTracks.groups
+                    .filter { it.type == androidx.media3.common.C.TRACK_TYPE_VIDEO }
+                    .flatMap { g -> (0 until g.length).map { g.getTrackFormat(it).height } }
+                    .filter { it > 0 }
+                    .distinct()
+                    .sortedDescending()
+            }
+            fun applyMaxHeight(h: Int?) {
+                val b = player.trackSelectionParameters.buildUpon()
+                player.trackSelectionParameters =
+                    (if (h == null) b.clearVideoSizeConstraints() else b.setMaxVideoSize(Int.MAX_VALUE, h)).build()
+                showQualityDialog = false
+            }
+            AlertDialog(
+                onDismissRequest = { showQualityDialog = false },
+                title = { Text("Video Quality", fontWeight = FontWeight.Bold, color = TextPrimary) },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        TvSettingsMenuItem("Auto", Icons.Default.HighQuality) { applyMaxHeight(null) }
+                        heights.forEach { h ->
+                            TvSettingsMenuItem("${h}p", Icons.Default.HighQuality) { applyMaxHeight(h) }
+                        }
+                        if (heights.size <= 1) {
+                            Text("This stream has a single quality.", color = TextSecondary, fontSize = 12.sp)
+                        }
+                    }
+                },
+                confirmButton = {},
+                containerColor = CircleSurface,
+                shape = RoundedCornerShape(12.dp)
+            )
+        }
+
         // Audio Track Selection Dialog
         if (showAudioDialog) {
             AlertDialog(
@@ -1243,161 +1448,277 @@ fun PlayerScreen(
             )
         }
 
-        // YouTube-style "Pull up to Explore More Videos" Handle (Auto-hides with controls)
+        // Playback Speed Selection Dialog
+        if (showSpeedDialog) {
+            val speedOptions = listOf(0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 2.0f)
+            AlertDialog(
+                onDismissRequest = { showSpeedDialog = false },
+                title = { Text("Playback Speed", fontWeight = FontWeight.Bold, color = TextPrimary) },
+                text = {
+                    Column {
+                        speedOptions.forEach { speed ->
+                            val isSelected = currentSpeed == speed
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        currentSpeed = speed
+                                        player.setPlaybackSpeed(speed)
+                                        showSpeedDialog = false
+                                        showGestureIndicator = "Speed: ${speed}x"
+                                    }
+                                    .padding(vertical = 10.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = if (speed == 1.0f) "1.0x (Normal)" else "${speed}x",
+                                    color = if (isSelected) CircleRed else TextPrimary,
+                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                                )
+                                if (isSelected) {
+                                    Icon(Icons.Default.Check, contentDescription = null, tint = CircleRed)
+                                }
+                            }
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { showSpeedDialog = false }) {
+                        Text("Close", color = CircleRed)
+                    }
+                },
+                containerColor = CircleSurface,
+                shape = RoundedCornerShape(12.dp)
+            )
+        }
+
+        // TV Player Bottom OSD Bar (Seek Bar + Core Controls: Play/Pause, Skip Backward/Forward 10s, Settings, Full Screen)
         AnimatedVisibility(
-            visible = areControlsVisible && !showExploreDrawer && playbackError == null,
+            visible = areControlsVisible && playbackError == null,
             enter = fadeIn() + slideInVertically { it },
             exit = fadeOut() + slideOutVertically { it },
             modifier = Modifier.align(Alignment.BottomCenter)
         ) {
             Surface(
-                color = Color.Black.copy(alpha = 0.65f),
-                shape = RoundedCornerShape(topStart = 14.dp, topEnd = 14.dp),
-                modifier = Modifier
-                    .clickable { showExploreDrawer = true }
-                    .padding(bottom = 2.dp)
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 5.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(
-                        Icons.Default.KeyboardArrowUp,
-                        contentDescription = null,
-                        tint = CircleRed,
-                        modifier = Modifier.size(16.dp)
-                    )
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text(
-                        text = "Explore Videos",
-                        color = Color.White,
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                }
-            }
-        }
-
-        // YouTube-style Explore More Videos Drawer
-        if (showExploreDrawer) {
-            Surface(
-                color = Color(0xFF141418).copy(alpha = 0.96f),
-                shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
+                color = Color.Black.copy(alpha = 0.90f),
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(240.dp)
-                    .align(Alignment.BottomCenter)
+                    .padding(horizontal = 24.dp, vertical = 12.dp),
+                shape = RoundedCornerShape(16.dp),
+                border = BorderStroke(1.dp, Color.White.copy(alpha = 0.15f))
             ) {
-                Column(modifier = Modifier.padding(14.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Default.Explore, contentDescription = null, tint = CircleRed, modifier = Modifier.size(18.dp))
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text("Explore More Videos • Up Next", fontWeight = FontWeight.Bold, fontSize = 14.sp, color = TextPrimary)
-                        }
-                        IconButton(onClick = { showExploreDrawer = false }, modifier = Modifier.size(28.dp)) {
-                            Icon(Icons.Default.Close, contentDescription = "Close", tint = TextSecondary, modifier = Modifier.size(18.dp))
-                        }
-                    }
-                    Spacer(modifier = Modifier.height(10.dp))
-                    if (isExploreLoading) {
-                        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                            CircularProgressIndicator(color = CircleRed)
-                        }
-                    } else if (explorePosts.isEmpty()) {
-                        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                            Text("Loading videos from Circle FTP...", color = TextSecondary, fontSize = 12.sp)
-                        }
-                    } else {
-                        LazyRow(
-                            horizontalArrangement = Arrangement.spacedBy(10.dp),
-                            modifier = Modifier.fillMaxSize()
-                        ) {
-                            items(explorePosts) { post ->
-                                Surface(
-                                    color = CircleSurface,
-                                    shape = RoundedCornerShape(8.dp),
-                                    modifier = Modifier
-                                        .width(120.dp)
-                                        .fillMaxHeight()
-                                        .clickable {
-                                            scope.launch {
-                                                isExploreLoading = true
-                                                try {
-                                                    val detail = apiClient.getPostDetail(post.id) ?: run {
-                                                        isExploreLoading = false
-                                                        Toast.makeText(context, "Stream currently unavailable", Toast.LENGTH_SHORT).show()
-                                                        return@launch
-                                                    }
-                                                    val urlToPlay = detail.singleStreamUrl
-                                                        ?: detail.multiFiles.firstOrNull()?.streamUrl
-                                                        ?: detail.seasons.firstOrNull()?.episodes?.firstOrNull()?.streamUrl
+                Column(
+                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    // 1. Seek Bar (Progress Bar)
+                    // Strict D-pad Left and Right seeking rather than jumping focus off the player UI
+                    if (!isLiveIptv && totalDurationMs > 0L) {
+                        val seekInteractionSource = remember { MutableInteractionSource() }
+                        val isSeekFocused by seekInteractionSource.collectIsFocusedAsState()
+                        val progress = (currentPositionMs.toFloat() / totalDurationMs.toFloat()).coerceIn(0f, 1f)
 
-                                                    val titleToPlay = detail.multiFiles.firstOrNull()?.title
-                                                        ?: detail.seasons.firstOrNull()?.episodes?.firstOrNull()?.title
-                                                        ?: detail.title
-
-                                                    if (!urlToPlay.isNullOrBlank()) {
-                                                        ActivePlayerSession.set(
-                                                            title = titleToPlay,
-                                                            streamUrl = urlToPlay,
-                                                            postId = detail.id,
-                                                            posterUrl = detail.backdropUrl.ifBlank { detail.posterUrl },
-                                                            isSeries = detail.isSeries,
-                                                            seasonNumber = if (detail.isSeries) 1 else null,
-                                                            episodeNumber = if (detail.isSeries) 1 else null
-                                                        )
-                                                        activeTitle = titleToPlay
-                                                        activeStreamUrl = urlToPlay
-                                                        showExploreDrawer = false
-                                                        Toast.makeText(context, "Playing: $titleToPlay", Toast.LENGTH_SHORT).show()
-                                                    } else {
-                                                        Toast.makeText(context, "No streamable video file found", Toast.LENGTH_SHORT).show()
-                                                    }
-                                                } catch (e: Exception) {
-                                                    Toast.makeText(context, "Failed to load: ${e.message}", Toast.LENGTH_SHORT).show()
-                                                } finally {
-                                                    isExploreLoading = false
-                                                }
-                                            }
-                                        }
-                                ) {
-                                    Column {
-                                        Box(
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .height(115.dp)
-                                                .clip(RoundedCornerShape(topStart = 8.dp, topEnd = 8.dp))
-                                                .background(Color.DarkGray)
-                                        ) {
-                                            AsyncImage(
-                                                model = post.getPosterUrl(),
-                                                contentDescription = post.displayTitle,
-                                                contentScale = ContentScale.Crop,
-                                                modifier = Modifier.fillMaxSize()
-                                            )
-                                        }
-                                        Column(modifier = Modifier.padding(4.dp)) {
-                                            Text(
-                                                text = post.displayTitle,
-                                                fontWeight = FontWeight.SemiBold,
-                                                fontSize = 11.sp,
-                                                color = TextPrimary,
-                                                maxLines = 2,
-                                                overflow = TextOverflow.Ellipsis
-                                            )
-                                            if (!post.year.isNullOrBlank()) {
-                                                Text(text = post.year, fontSize = 9.sp, color = TextSecondary)
-                                            }
-                                        }
-                                    }
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .focusRequester(seekBarFocusRequester)
+                                .focusProperties {
+                                    up = backButtonFocusRequester
+                                    down = playPauseFocusRequester
                                 }
+                                .focusable(interactionSource = seekInteractionSource)
+                                .onKeyEvent { keyEvent ->
+                                    if (keyEvent.type == KeyEventType.KeyDown) {
+                                        when (keyEvent.key) {
+                                            Key.DirectionLeft -> {
+                                                val stepMs = settings.seekIntervalSeconds * 1000L
+                                                val newPos = (player.currentPosition - stepMs).coerceAtLeast(0L)
+                                                player.seekTo(newPos)
+                                                doubleTapFeedback = "⏪ ${settings.seekIntervalSeconds} sec"
+                                                lastInteractionTime = System.currentTimeMillis()
+                                                true
+                                            }
+                                            Key.DirectionRight -> {
+                                                val stepMs = settings.seekIntervalSeconds * 1000L
+                                                val dur = player.duration
+                                                val newPos = player.currentPosition + stepMs
+                                                player.seekTo(if (dur > 0) newPos.coerceAtMost(dur) else newPos)
+                                                doubleTapFeedback = "${settings.seekIntervalSeconds} sec ⏩"
+                                                lastInteractionTime = System.currentTimeMillis()
+                                                true
+                                            }
+                                            else -> false
+                                        }
+                                    } else false
+                                }
+                                .padding(vertical = 4.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(if (isSeekFocused) 10.dp else 6.dp)
+                                    .clip(RoundedCornerShape(4.dp))
+                                    .background(Color.White.copy(alpha = 0.2f))
+                                    .border(
+                                        width = if (isSeekFocused) 2.dp else 0.dp,
+                                        color = if (isSeekFocused) Color.White else Color.Transparent,
+                                        shape = RoundedCornerShape(4.dp)
+                                    )
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth(fraction = progress)
+                                        .fillMaxHeight()
+                                        .background(CircleRed)
+                                )
+                            }
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = formatPlayerTime(currentPositionMs),
+                                    color = if (isSeekFocused) Color.White else TextPrimary,
+                                    fontSize = 12.sp,
+                                    fontWeight = if (isSeekFocused) FontWeight.Bold else FontWeight.SemiBold
+                                )
+                                if (isSeekFocused) {
+                                    Text(
+                                        text = "◀ / ▶ Seek 10s",
+                                        color = CircleRed,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                                Text(
+                                    text = formatPlayerTime(totalDurationMs),
+                                    color = TextSecondary,
+                                    fontSize = 12.sp
+                                )
                             }
                         }
+                    }
+
+                    // 2. Core Buttons Row: Skip Backward (10s), Play/Pause, Skip Forward (10s), Settings (Gear), Full Screen
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.Center,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(14.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            // Skip Backward (10s)
+                            TvPlayerControlButton(
+                                text = "10s",
+                                icon = Icons.Default.Replay10,
+                                onClick = {
+                                    val stepMs = settings.seekIntervalSeconds * 1000L
+                                    val newPos = (player.currentPosition - stepMs).coerceAtLeast(0L)
+                                    player.seekTo(newPos)
+                                    doubleTapFeedback = "⏪ ${settings.seekIntervalSeconds} sec"
+                                    lastInteractionTime = System.currentTimeMillis()
+                                },
+                                modifier = Modifier
+                                    .focusRequester(skipBackFocusRequester)
+                                    .focusProperties {
+                                        up = if (!isLiveIptv && totalDurationMs > 0L) seekBarFocusRequester else backButtonFocusRequester
+                                        right = playPauseFocusRequester
+                                    }
+                            )
+
+                            // Play / Pause Toggle
+                            TvPlayerControlButton(
+                                text = if (player.isPlaying) "Pause" else "Play",
+                                icon = if (player.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                                onClick = {
+                                    if (player.isPlaying) player.pause() else player.play()
+                                    lastInteractionTime = System.currentTimeMillis()
+                                },
+                                modifier = Modifier
+                                    .focusRequester(playPauseFocusRequester)
+                                    .focusProperties {
+                                        up = if (!isLiveIptv && totalDurationMs > 0L) seekBarFocusRequester else backButtonFocusRequester
+                                        left = skipBackFocusRequester
+                                        right = skipForwardFocusRequester
+                                    }
+                            )
+
+                            // Skip Forward (10s)
+                            TvPlayerControlButton(
+                                text = "10s",
+                                icon = Icons.Default.Forward10,
+                                onClick = {
+                                    val stepMs = settings.seekIntervalSeconds * 1000L
+                                    val dur = player.duration
+                                    val newPos = player.currentPosition + stepMs
+                                    player.seekTo(if (dur > 0) newPos.coerceAtMost(dur) else newPos)
+                                    doubleTapFeedback = "${settings.seekIntervalSeconds} sec ⏩"
+                                    lastInteractionTime = System.currentTimeMillis()
+                                },
+                                modifier = Modifier
+                                    .focusRequester(skipForwardFocusRequester)
+                                    .focusProperties {
+                                        up = if (!isLiveIptv && totalDurationMs > 0L) seekBarFocusRequester else watchLaterFocusRequester
+                                        left = playPauseFocusRequester
+                                        right = settingsFocusRequester
+                                    }
+                            )
+
+                            // Settings (Gear icon)
+                            TvPlayerControlButton(
+                                text = "Settings",
+                                icon = Icons.Default.Settings,
+                                onClick = {
+                                    showSettingsModal = true
+                                    lastInteractionTime = System.currentTimeMillis()
+                                },
+                                modifier = Modifier
+                                    .focusRequester(settingsFocusRequester)
+                                    .focusProperties {
+                                        up = if (!isLiveIptv && totalDurationMs > 0L) seekBarFocusRequester else watchLaterFocusRequester
+                                        left = skipForwardFocusRequester
+                                        right = fullscreenFocusRequester
+                                    }
+                            )
+
+                            // Full Screen / Aspect Ratio Toggle
+                            TvPlayerControlButton(
+                                text = currentAspectMode.displayName,
+                                icon = Icons.Default.Fullscreen,
+                                onClick = {
+                                    val modes = AspectRatioMode.values()
+                                    val nextIndex = (currentAspectMode.ordinal + 1) % modes.size
+                                    currentAspectMode = modes[nextIndex]
+                                    showGestureIndicator = "Screen: ${currentAspectMode.displayName}"
+                                    lastInteractionTime = System.currentTimeMillis()
+                                },
+                                modifier = Modifier
+                                    .focusRequester(fullscreenFocusRequester)
+                                    .focusProperties {
+                                        up = if (!isLiveIptv && totalDurationMs > 0L) seekBarFocusRequester else watchLaterFocusRequester
+                                        left = settingsFocusRequester
+                                    }
+                            )
+                        }
+                    }
+
+                    // 3. Remote Control Key Hints (10-Foot UI)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.Center,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "▲ Top Actions  •  ◀ / ▶ Seek 10s  •  ▼ Controls  •  OK Select",
+                            color = TextSecondary,
+                            fontSize = 11.sp
+                        )
                     }
                 }
             }
@@ -1557,7 +1878,12 @@ fun PlayerScreen(
                     ) {
                         itemsIndexed(ActivePlayerSession.playlist) { idx, ep ->
                             val isCurrent = idx == ActivePlayerSession.currentIndex
-                            Card(
+                            val isFirst = idx == 0 && ActivePlayerSession.currentIndex !in ActivePlayerSession.playlist.indices
+                            TvEpisodeRowItem(
+                                episodeNumber = idx + 1,
+                                title = ep.title,
+                                isNowPlaying = isCurrent,
+                                focusRequester = if (isCurrent || isFirst) currentEpFocusRequester else null,
                                 onClick = {
                                     if (!isCurrent) {
                                         ActivePlayerSession.switchToIndex(idx)
@@ -1566,81 +1892,11 @@ fun PlayerScreen(
                                         showEpisodeDrawer = false
                                         retryTrigger++
                                         Toast.makeText(context, "Playing: ${ep.title}", Toast.LENGTH_SHORT).show()
-                                    }
-                                },
-                                colors = CardDefaults.cardColors(
-                                    containerColor = if (isCurrent) CircleCard else Color.Black.copy(alpha = 0.4f)
-                                ),
-                                border = if (isCurrent) BorderStroke(1.5.dp, CircleRed) else null,
-                                shape = RoundedCornerShape(8.dp),
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(10.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Surface(
-                                        color = if (isCurrent) CircleRed else Color.White.copy(alpha = 0.1f),
-                                        shape = RoundedCornerShape(6.dp),
-                                        modifier = Modifier.size(34.dp)
-                                    ) {
-                                        Box(contentAlignment = Alignment.Center) {
-                                            if (isCurrent) {
-                                                Icon(
-                                                    Icons.Default.PlayArrow,
-                                                    contentDescription = null,
-                                                    tint = Color.White,
-                                                    modifier = Modifier.size(20.dp)
-                                                )
-                                            } else {
-                                                Text(
-                                                    text = "${idx + 1}",
-                                                    color = TextPrimary,
-                                                    fontWeight = FontWeight.Bold,
-                                                    fontSize = 12.sp
-                                                )
-                                            }
-                                        }
-                                    }
-
-                                    Spacer(modifier = Modifier.width(10.dp))
-
-                                    Column(modifier = Modifier.weight(1f)) {
-                                        if (isCurrent) {
-                                            Text(
-                                                text = "▶ NOW PLAYING",
-                                                color = CircleRed,
-                                                fontSize = 9.sp,
-                                                fontWeight = FontWeight.Black
-                                            )
-                                        }
-                                        Text(
-                                            text = ep.title,
-                                            color = if (isCurrent) TextPrimary else TextSecondary,
-                                            fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Normal,
-                                            fontSize = 13.sp,
-                                            maxLines = 2,
-                                            overflow = TextOverflow.Ellipsis
-                                        )
-                                    }
-
-                                    IconButton(
-                                        onClick = {
-                                            CircleDownloadManager.download(context, ep.title, ep.streamUrl)
-                                        },
-                                        modifier = Modifier.size(32.dp)
-                                    ) {
-                                        Icon(
-                                            Icons.Default.Download,
-                                            contentDescription = "Download",
-                                            tint = if (isCurrent) CircleRed else TextSecondary,
-                                            modifier = Modifier.size(18.dp)
-                                        )
+                                    } else {
+                                        showEpisodeDrawer = false
                                     }
                                 }
-                            }
+                            )
                         }
                     }
                 }
@@ -1959,5 +2215,246 @@ fun BoxScope.PlayerStatusOverlay(
                 )
             }
         }
+    }
+}
+
+/**
+ * TV Focusable Player Control Button for Top & Overlay Bar navigation.
+ * Uses MutableInteractionSource and collectIsFocusedAsState() for smooth 1.08x scaling,
+ * 2dp border, and high-visibility living room TV focus states.
+ */
+@Composable
+fun TvPlayerControlButton(
+    text: String,
+    icon: ImageVector,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val isFocused by interactionSource.collectIsFocusedAsState()
+
+    val scale by animateFloatAsState(
+        targetValue = if (isFocused) 1.08f else 1.0f,
+        animationSpec = tween(durationMillis = 150),
+        label = "btn_scale"
+    )
+
+    Surface(
+        shape = RoundedCornerShape(8.dp),
+        color = if (isFocused) Color(0xFFE50914) else Color.Black.copy(alpha = 0.65f),
+        modifier = modifier
+            .scale(scale)
+            .border(
+                width = if (isFocused) 2.dp else 0.dp,
+                color = if (isFocused) Color.White else Color.Transparent,
+                shape = RoundedCornerShape(8.dp)
+            )
+            .focusable(interactionSource = interactionSource)
+            .clickable(
+                interactionSource = interactionSource,
+                indication = null,
+                onClick = onClick
+            )
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(icon, contentDescription = text, tint = Color.White, modifier = Modifier.size(18.dp))
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(text, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+        }
+    }
+}
+
+/** Full-width focusable row used inside the player Settings / Quality dialogs. */
+@Composable
+fun TvSettingsMenuItem(
+    title: String,
+    icon: ImageVector,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val isFocused by interactionSource.collectIsFocusedAsState()
+    Surface(
+        shape = RoundedCornerShape(8.dp),
+        color = if (isFocused) CircleRed else Color.White.copy(alpha = 0.06f),
+        border = BorderStroke(2.dp, if (isFocused) Color.White else Color.Transparent),
+        modifier = modifier
+            .fillMaxWidth()
+            .focusable(interactionSource = interactionSource)
+            .clickable(interactionSource = interactionSource, indication = null, onClick = onClick)
+    ) {
+        Row(modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+            Icon(icon, contentDescription = null, tint = Color.White, modifier = Modifier.size(20.dp))
+            Spacer(modifier = Modifier.width(12.dp))
+            Text(title, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+            Icon(Icons.Default.ChevronRight, contentDescription = null, tint = Color.White.copy(alpha = 0.7f), modifier = Modifier.size(18.dp))
+        }
+    }
+}
+
+/**
+ * TV Focusable Quick Action Pill with smooth scale animation (1.08x)
+ * and distinct white/red focus border for living room D-Pad navigation.
+ */
+@Composable
+fun TvQuickActionPill(
+    icon: ImageVector,
+    label: String,
+    onClick: () -> Unit,
+    isSelected: Boolean = false,
+    modifier: Modifier = Modifier
+) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val isFocused by interactionSource.collectIsFocusedAsState()
+    val scale by animateFloatAsState(
+        targetValue = if (isFocused) 1.08f else 1.0f,
+        animationSpec = tween(durationMillis = 150),
+        label = "pill_scale"
+    )
+
+    Surface(
+        color = when {
+            isFocused -> CircleRed
+            isSelected -> Color.White.copy(alpha = 0.2f)
+            else -> Color.Black.copy(alpha = 0.65f)
+        },
+        shape = RoundedCornerShape(20.dp),
+        border = BorderStroke(
+            width = if (isFocused) 2.dp else 1.dp,
+            color = if (isFocused) Color.White else Color.White.copy(alpha = 0.25f)
+        ),
+        modifier = modifier
+            .scale(scale)
+            .focusable(interactionSource = interactionSource)
+            .clickable(
+                interactionSource = interactionSource,
+                indication = null,
+                onClick = onClick
+            )
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = label,
+                tint = if (isFocused) Color.White else TextPrimary,
+                modifier = Modifier.size(16.dp)
+            )
+            Text(
+                text = label,
+                color = if (isFocused) Color.White else TextPrimary,
+                fontSize = 12.sp,
+                fontWeight = if (isFocused || isSelected) FontWeight.Bold else FontWeight.Medium
+            )
+        }
+    }
+}
+
+@Composable
+fun TvEpisodeRowItem(
+    episodeNumber: Int,
+    title: String,
+    isNowPlaying: Boolean,
+    focusRequester: FocusRequester? = null,
+    onClick: () -> Unit
+) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val isFocused by interactionSource.collectIsFocusedAsState()
+
+    val scale by animateFloatAsState(if (isFocused) 1.04f else 1.0f, label = "ep_scale")
+    val bgColor by animateColorAsState(
+        targetValue = when {
+            isFocused -> Color.White.copy(alpha = 0.22f)
+            isNowPlaying -> Color(0xFFE50914).copy(alpha = 0.25f)
+            else -> Color(0xFF1E1E24)
+        },
+        label = "ep_bg"
+    )
+    val borderColor by animateColorAsState(
+        targetValue = when {
+            isFocused -> Color.White // Bright white stroke for D-pad cursor
+            isNowPlaying -> Color(0xFFE50914) // Red stroke for Now Playing
+            else -> Color.Transparent
+        },
+        label = "ep_border"
+    )
+
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp, horizontal = 8.dp)
+            .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
+            .scale(scale)
+            .background(bgColor, RoundedCornerShape(10.dp))
+            .border(
+                width = if (isFocused) 3.dp else if (isNowPlaying) 1.5.dp else 0.dp,
+                color = borderColor,
+                shape = RoundedCornerShape(10.dp)
+            )
+            .focusable(interactionSource = interactionSource)
+            .clickable(
+                interactionSource = interactionSource,
+                indication = null,
+                onClick = onClick
+            )
+            .padding(horizontal = 14.dp, vertical = 12.dp)
+    ) {
+        // Episode Index Box
+        Box(
+            contentAlignment = Alignment.Center,
+            modifier = Modifier
+                .size(32.dp)
+                .background(
+                    if (isFocused) Color.White else if (isNowPlaying) Color(0xFFE50914) else Color.DarkGray,
+                    RoundedCornerShape(6.dp)
+                )
+        ) {
+            Text(
+                text = episodeNumber.toString(),
+                color = if (isFocused) Color.Black else Color.White,
+                fontWeight = FontWeight.Bold,
+                fontSize = 13.sp
+            )
+        }
+
+        Spacer(modifier = Modifier.width(12.dp))
+
+        Column(modifier = Modifier.weight(1f)) {
+            if (isNowPlaying) {
+                Text(
+                    text = "▶ NOW PLAYING",
+                    color = if (isFocused) Color.White else Color(0xFFE50914),
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.ExtraBold
+                )
+            }
+            Text(
+                text = title,
+                color = Color.White,
+                fontWeight = if (isFocused || isNowPlaying) FontWeight.Bold else FontWeight.Normal,
+                fontSize = 14.sp,
+                maxLines = 1
+            )
+        }
+    }
+}
+
+private fun formatPlayerTime(ms: Long): String {
+    if (ms <= 0L) return "00:00"
+    val totalSeconds = ms / 1000
+    val seconds = totalSeconds % 60
+    val minutes = (totalSeconds / 60) % 60
+    val hours = totalSeconds / 3600
+    return if (hours > 0) {
+        String.format("%02d:%02d:%02d", hours, minutes, seconds)
+    } else {
+        String.format("%02d:%02d", minutes, seconds)
     }
 }

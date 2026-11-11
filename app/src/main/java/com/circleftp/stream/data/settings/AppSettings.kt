@@ -44,6 +44,10 @@ class AppSettings private constructor(context: Context) {
         get() = prefs.getBoolean(KEY_AUTO_PLAY_NEXT, true)
         set(value) = prefs.edit().putBoolean(KEY_AUTO_PLAY_NEXT, value).apply()
 
+    var lastWatchedChannelId: String?
+        get() = prefs.getString(KEY_LAST_CHANNEL_ID, null)
+        set(value) = prefs.edit().putString(KEY_LAST_CHANNEL_ID, value).apply()
+
     fun clearCache() {
         // Method invoked when user taps Clear Cache
     }
@@ -56,6 +60,7 @@ class AppSettings private constructor(context: Context) {
         private const val KEY_PINCH_ZOOM = "pref_pinch_zoom"
         private const val KEY_HW_FALLBACK = "pref_hw_fallback"
         private const val KEY_AUTO_PLAY_NEXT = "pref_auto_play_next"
+        private const val KEY_LAST_CHANNEL_ID = "pref_last_channel_id"
 
         @Volatile
         private var INSTANCE: AppSettings? = null

@@ -1,7 +1,14 @@
 package com.circleftp.stream.ui.components
 
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.focusable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -33,11 +40,13 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -115,12 +124,37 @@ private fun ContinueWatchingCard(
     onClick: () -> Unit,
     onRemove: () -> Unit
 ) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val isFocused by interactionSource.collectIsFocusedAsState()
+
+    // 1. "Bump Up" Scale Animation
+    val scale by animateFloatAsState(
+        targetValue = if (isFocused) 1.08f else 1.0f,
+        animationSpec = tween(durationMillis = 200),
+        label = "cw_scale"
+    )
+
+    // 2. "Light Stroke" Border Animation
+    val borderColor by animateColorAsState(
+        targetValue = if (isFocused) Color.White else Color.Transparent,
+        animationSpec = tween(durationMillis = 200),
+        label = "cw_border"
+    )
+
     Column(
         modifier = Modifier
             .width(210.dp)
+            .zIndex(if (isFocused) 1f else 0f) // Prevents scaling under neighboring cards
+            .scale(scale)
             .clip(RoundedCornerShape(12.dp))
             .background(CircleSurface)
-            .clickable { onClick() }
+            .border(
+                width = if (isFocused) 3.dp else 0.dp,
+                color = borderColor,
+                shape = RoundedCornerShape(12.dp)
+            )
+            .focusable(interactionSource = interactionSource)
+            .clickable(interactionSource = interactionSource, indication = null) { onClick() }
     ) {
         Box(
             modifier = Modifier
@@ -250,6 +284,9 @@ private fun ContinueWatchingCard(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
+            if (!entity.streamUrl.isNullOrBlank()) {
+                MediaFormatBadge(videoUrl = entity.streamUrl)
+            }
         }
     }
 }

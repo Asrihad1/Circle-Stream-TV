@@ -91,16 +91,18 @@ class CircleFtpProvider(
             return ResolvedStreamModel()
         }
 
+        val directStreamUrl = CircleFtpFolderResolver.resolve(streamUrl)
+
         val format = when {
-            streamUrl.contains(".m3u8", ignoreCase = true) -> StreamFormat.HLS
-            streamUrl.contains(".mkv", ignoreCase = true) -> StreamFormat.MKV
+            directStreamUrl.contains(".m3u8", ignoreCase = true) -> StreamFormat.HLS
+            directStreamUrl.contains(".mkv", ignoreCase = true) -> StreamFormat.MKV
             else -> StreamFormat.MP4
         }
 
         return ResolvedStreamModel(
             streams = listOf(
                 StreamSource(
-                    url = streamUrl,
+                    url = directStreamUrl,
                     quality = detail.quality ?: "BDIX High-Speed",
                     format = format,
                     serverName = "Circle FTP BDIX Node"

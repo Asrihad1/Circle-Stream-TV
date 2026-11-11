@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Android TV 16:9 Leanback Launcher Banner Background -->
+    <item>
+        <shape android:shape="rectangle">
+            <gradient
+                android:angle="315"
+                android:startColor="#25080A"
+                android:centerColor="#12141A"
+                android:endColor="#0A0B0E"
+                android:type="linear" />
+            <size
+                android:width="320dp"
+                android:height="180dp" />
+        </shape>
+    </item>
+
+    <!-- App Branding Logo in Center -->
+    <item
+        android:gravity="center"
+        android:width="220dp"
+        android:height="80dp">
+        <bitmap
+            android:src="@drawable/ic_logo_header"
+            android:gravity="center" />
+    </item>
+</layer-list>
+
